@@ -26,7 +26,6 @@ use crate::ax::bindings::{
     kAXErrorSuccess, perform_action, set_number_attr, set_string_attr, AXUIElementRef,
 };
 use crate::focus_guard;
-use crate::window_change_detector::WindowChangeDetector;
 use core_foundation::base::CFRelease;
 
 use super::ToolState;
@@ -78,6 +77,11 @@ fn def() -> &'static ToolDef {
 impl Tool for SetValueTool {
     fn def(&self) -> &ToolDef {
         def()
+    }
+
+    /// Always a background AX mutation of one snapshot element.
+    fn has_independent_input_lane(&self, args: &Value) -> bool {
+        super::ax_semantic_lane(args)
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
@@ -214,7 +218,8 @@ impl Tool for SetValueTool {
         // in Chromium-based apps; the AXPopUpButton path also AXPresses a
         // child option which can trigger app activation in some setups.
         let prior_front = apps::frontmost_pid();
-        let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let snapshot =
+            super::element_action_snapshot(super::ax_semantic_lane(&args), prior_front, pid);
 
         let result = focus_guard::with_focus_suppressed(
             Some(pid),

@@ -276,6 +276,62 @@ pub(crate) use health_report::sw_vers_product_version as macos_product_version;
 /// (`element_index` vs `x/y`, which selects AX vs pixel).
 pub use cua_driver_core::delivery::DeliveryMode;
 
+/// Whether a call takes the independent input lane: a background action on
+/// one snapshot element, delivered through Accessibility. Such an action
+/// posts no HID or pid-routed event and activates nothing on purpose, so it
+/// can run while actions on other apps run: the per-pid mutation lease
+/// serializes it against actions on the same app, and its focus guard and
+/// change report are scoped to its own pid
+/// ([`crate::window_change_detector::WindowChangeDetector::snapshot_for_lane`]).
+/// Tools that can leave the AX route mid-call (a pixel fallback) must not
+/// take that fallback on this lane.
+pub(crate) fn ax_semantic_lane(args: &serde_json::Value) -> bool {
+    let present = |key: &str| args.get(key).is_some_and(|value| !value.is_null());
+    args["element_token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty())
+        && !present("x")
+        && !present("y")
+        && !DeliveryMode::parse(args["delivery_mode"].as_str()).is_foreground()
+        && args["dispatch"] != "foreground"
+        && args["scope"] != "desktop"
+}
+
+/// Whether a keyboard call takes the independent input lane: background
+/// text or keys for one exact window (an `element_token`, or pid and
+/// window_id), with no `x, y` focus click. Background keyboard delivery posts
+/// per-process key records to the target and never activates it; the
+/// foreground rung, which does, is excluded.
+pub(crate) fn keyboard_lane(args: &serde_json::Value) -> bool {
+    let present = |key: &str| args.get(key).is_some_and(|value| !value.is_null());
+    let exact_window = args["element_token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty())
+        || (args["pid"].as_i64().is_some_and(|pid| pid > 0)
+            && args["window_id"].as_u64().is_some_and(|id| id > 0));
+    exact_window
+        && !present("x")
+        && !present("y")
+        && !DeliveryMode::parse(args["delivery_mode"].as_str()).is_foreground()
+        && args["dispatch"] != "foreground"
+        && args["scope"] != "desktop"
+}
+
+/// The before-state of an AX element action: lane-scoped on the independent
+/// lane, the wildcard-suppressing snapshot otherwise.
+pub(crate) fn element_action_snapshot(
+    lane: bool,
+    prior_front: Option<i32>,
+    pid: i32,
+) -> crate::window_change_detector::Snapshot {
+    use crate::window_change_detector::WindowChangeDetector;
+    if lane {
+        WindowChangeDetector::snapshot_for_lane(prior_front, pid)
+    } else {
+        WindowChangeDetector::snapshot(prior_front)
+    }
+}
+
 /// Convert a pure background-input refusal into the structured refusal result
 /// shape shared by exact-target tools: `code`, `effect: "refused"`, the
 /// requested target, and the safe next route when one exists. No actuator ran.
@@ -1408,5 +1464,42 @@ mod windowserver_refusal_tests {
             .as_str()
             .unwrap()
             .contains("cua-driver permissions grant"));
+    }
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::{ax_semantic_lane, keyboard_lane};
+    use serde_json::json;
+
+    #[test]
+    fn element_actions_take_the_lane_only_in_the_background_without_pixels() {
+        assert!(ax_semantic_lane(&json!({"element_token": "s00000001:2"})));
+        for refused in [
+            json!({"element_token": "s00000001:2", "delivery_mode": "Foreground"}),
+            json!({"element_token": "s00000001:2", "x": 4, "y": 5}),
+            json!({"element_token": "s00000001:2", "scope": "desktop"}),
+            json!({"pid": 10, "window_id": 20}),
+            json!({"element_token": ""}),
+        ] {
+            assert!(!ax_semantic_lane(&refused), "{refused}");
+        }
+    }
+
+    #[test]
+    fn keyboard_takes_the_lane_for_one_exact_window_in_the_background() {
+        assert!(keyboard_lane(
+            &json!({"pid": 10, "window_id": 20, "key": "a"})
+        ));
+        assert!(keyboard_lane(
+            &json!({"element_token": "s00000001:2", "text": "hi"})
+        ));
+        for refused in [
+            json!({"pid": 10, "key": "a"}),
+            json!({"pid": 10, "window_id": 20, "delivery_mode": "foreground"}),
+            json!({"pid": 10, "window_id": 20, "x": 1, "y": 2}),
+        ] {
+            assert!(!keyboard_lane(&refused), "{refused}");
+        }
     }
 }

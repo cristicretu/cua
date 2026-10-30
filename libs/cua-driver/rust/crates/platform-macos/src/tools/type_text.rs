@@ -128,6 +128,11 @@ impl Tool for TypeTextTool {
         def()
     }
 
+    /// Background keys for one exact window (see [`super::keyboard_lane`]).
+    fn has_independent_input_lane(&self, args: &Value) -> bool {
+        super::keyboard_lane(args)
+    }
+
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
         if args.opt_str("scope").as_deref() == Some("desktop")
@@ -349,7 +354,11 @@ impl Tool for TypeTextTool {
         // helper windows. Wrap so callers see them in the result suffix
         // and the wildcard suppressor catches reflex activations.
         let prior_front = apps::frontmost_pid();
-        let snapshot = WindowChangeDetector::snapshot(prior_front);
+        let snapshot = if super::keyboard_lane(&args) {
+            WindowChangeDetector::snapshot_for_lane(prior_front, pid)
+        } else {
+            WindowChangeDetector::snapshot(prior_front)
+        };
 
         // Terminal-emulator short-circuit: when the target pid belongs
         // to a known terminal (Ghostty / Terminal.app / iTerm2 / …), the

@@ -3398,8 +3398,14 @@ fn requires_desktop_coordination(tool: &str, args: &Value, independent_lane: boo
     }
     // Only an implementation-attested, exact-window background route can
     // leave the shared lane. Explicit desktop and foreground calls never do.
-    let exact_background_window = args["pid"].as_u64().is_some_and(|pid| pid > 0)
-        && args["window_id"].as_u64().is_some_and(|id| id > 0)
+    // An `element_token` names exactly one snapshot window (the tool refuses
+    // a conflicting `window_id`), so it targets as exactly as pid+window_id.
+    let exact_window = (args["pid"].as_u64().is_some_and(|pid| pid > 0)
+        && args["window_id"].as_u64().is_some_and(|id| id > 0))
+        || args["element_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty());
+    let exact_background_window = exact_window
         && args["scope"] != "desktop"
         && args.pointer("/target/kind").and_then(Value::as_str) != Some("desktop")
         && args["delivery_mode"] != "foreground"
@@ -6166,6 +6172,28 @@ resources:
             &serde_json::json!({"independent_input_lane": true}),
             false
         ));
+    }
+
+    #[test]
+    fn an_element_token_targets_one_exact_window() {
+        use super::requires_desktop_coordination;
+        let token = serde_json::json!({"element_token": "s00000001:3"});
+        assert!(!requires_desktop_coordination("click", &token, true));
+        assert!(requires_desktop_coordination("click", &token, false));
+        for fields in [
+            serde_json::json!({"delivery_mode": "foreground"}),
+            serde_json::json!({"scope": "desktop"}),
+            serde_json::json!({"element_token": ""}),
+        ] {
+            let mut args = token.clone();
+            args.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            assert!(
+                requires_desktop_coordination("click", &args, true),
+                "{args}"
+            );
+        }
     }
 
     #[test]

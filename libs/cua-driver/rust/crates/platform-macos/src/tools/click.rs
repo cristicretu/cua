@@ -376,10 +376,26 @@ fn def() -> &'static ToolDef {
     })
 }
 
+/// Whether this click takes the independent input lane (see
+/// [`super::ax_semantic_lane`]).
+fn click_takes_lane(args: &Value) -> bool {
+    super::ax_semantic_lane(args)
+        && !args["button"]
+            .as_str()
+            .is_some_and(|button| button.eq_ignore_ascii_case("middle"))
+}
+
 #[async_trait]
 impl Tool for ClickTool {
     fn def(&self) -> &ToolDef {
         def()
+    }
+
+    /// A background element click is AX delivery (press, show_menu and the
+    /// other actions). `button: "middle"` falls back to a pixel click, so it
+    /// stays on the serialized lane.
+    fn has_independent_input_lane(&self, args: &Value) -> bool {
+        click_takes_lane(args)
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
@@ -760,7 +776,13 @@ impl Tool for ClickTool {
             } else {
                 None
             };
-            let mut selection_pixel = if let Some(screen_center) = selection_center {
+            let lane = click_takes_lane(&args);
+            let mut selection_pixel = if lane {
+                // The selection fallback is a pixel click; the independent
+                // lane must not post one. The semantic path still runs and
+                // reports a suspected no-op, so the caller escalates.
+                None
+            } else if let Some(screen_center) = selection_center {
                 super::px_frame::resolve_or_refuse(wid)
                     .await
                     .ok()
@@ -802,7 +824,7 @@ impl Tool for ClickTool {
             let snapshot = if foreground {
                 WindowChangeDetector::snapshot_without_suppression(prior_front)
             } else {
-                WindowChangeDetector::snapshot(prior_front)
+                super::element_action_snapshot(lane, prior_front, pid)
             };
 
             // Run AX work on a blocking thread (can't block async executor).

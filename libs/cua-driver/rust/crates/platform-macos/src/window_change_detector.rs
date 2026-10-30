@@ -76,6 +76,9 @@ pub struct Snapshot {
     /// A change the previous action's detached tail saw after that action
     /// had returned; reported on this action's result.
     earlier: Option<Late>,
+    /// Set for an action on the independent input lane: the target pid whose
+    /// changes this snapshot reports. See [`WindowChangeDetector::snapshot_for_lane`].
+    lane_pid: Option<i32>,
 }
 
 /// Result of `detect()` — what changed during the action window.
@@ -362,6 +365,28 @@ impl WindowChangeDetector {
         Self::capture(prior_front, true, Some(allowed_pid))
     }
 
+    /// The before-state of an action on the independent input lane, which
+    /// runs concurrently with actions on other apps. The global detached tail,
+    /// late report and wildcard lease belong to the serialized lane: a
+    /// wildcard would revert another action's intentional activation (a
+    /// background pixel click makes its target active), and the shared tail
+    /// would end or report another action's observation. So this snapshot
+    /// suppresses only `pid` activating itself, reports only `pid`'s windows
+    /// and becoming frontmost, and never runs detached.
+    pub fn snapshot_for_lane(prior_front: Option<i32>, pid: i32) -> Snapshot {
+        let window_ids: HashSet<u32> = host_windows().into_iter().map(|w| w.window_id).collect();
+        let lease = prior_front.filter(|front| *front != pid).map(|restore_to| {
+            focus_steal::begin_suppression(Some(pid), restore_to, "WindowChangeDetector.lane")
+        });
+        Snapshot {
+            window_ids,
+            front_pid: prior_front,
+            _lease: lease,
+            earlier: None,
+            lane_pid: Some(pid),
+        }
+    }
+
     fn capture(
         prior_front: Option<i32>,
         suppress_focus: bool,
@@ -407,6 +432,7 @@ impl WindowChangeDetector {
             front_pid: prior_front,
             _lease: lease,
             earlier: None,
+            lane_pid: None,
         }
     }
 }
@@ -470,6 +496,19 @@ impl Snapshot {
             return Changes::not_polled().with_earlier(earlier);
         }
         let started = Instant::now();
+        if self.lane_pid.is_some() {
+            // A lane action never runs detached: the shared tail would end,
+            // or be ended by, a concurrent action's observation.
+            if report_window.is_zero() {
+                drop(self);
+                return Changes::not_polled();
+            }
+            let report = report_window.min(bounds.timeout);
+            let mut observe = observe;
+            return self
+                .poll_until(started + report, bounds.poll, &mut observe)
+                .unwrap_or_else(|_quiet| Changes::no_change());
+        }
         if report_window.is_zero() {
             // The caller skipped the wait: the whole deadline runs detached,
             // lease held, exactly as the remainder of a quiet poll does.
@@ -520,11 +559,17 @@ impl Snapshot {
         let (current, current_front) = observe();
         // Keep the live detector and the pure regression tests on the same
         // diff path so daemon-window filtering cannot drift between them.
-        let (new_windows, _closed) = Self::diff(&self.window_ids, &current);
-        let foreground_changed = match (self.front_pid, current_front) {
+        let (mut new_windows, _closed) = Self::diff(&self.window_ids, &current);
+        let mut foreground_changed = match (self.front_pid, current_front) {
             (Some(orig), Some(cur)) => orig != cur,
             _ => false,
         };
+        if let Some(pid) = self.lane_pid {
+            // Concurrent lane actions on other apps open their own windows;
+            // they are not this action's side effects.
+            new_windows.retain(|window| window.pid == pid);
+            foreground_changed &= current_front == Some(pid);
+        }
         (!new_windows.is_empty() || foreground_changed).then(|| Changes {
             new_windows,
             foreground_changed,
@@ -866,6 +911,41 @@ mod tests {
         assert!(!changes.polled);
         assert!(!changes.needs_restore());
         assert_eq!(changes.result_suffix(), "");
+    }
+
+    /// A lane action runs beside actions on other apps: their windows and
+    /// activations are not its side effects, and it never leaves a detached
+    /// tail that a concurrent action would end.
+    #[test]
+    fn a_lane_snapshot_reports_only_its_own_pid() {
+        let mut snap = WindowChangeDetector::capture_from(HashSet::from([1]), Some(3), false, None);
+        snap.lane_pid = Some(7);
+        let changes =
+            snap.detect_bounded_with(observation_bounds_from(Some("30"), Some("10")), || {
+                (
+                    vec![win(1, 3, "User", "Main"), win(2, 8, "Other", "Sheet")],
+                    Some(8),
+                )
+            });
+        assert!(changes.new_windows.is_empty());
+        assert!(!changes.foreground_changed);
+        assert!(
+            lock(&TAIL).is_none(),
+            "a lane action leaves no detached tail"
+        );
+
+        let mut snap = WindowChangeDetector::capture_from(HashSet::from([1]), Some(3), false, None);
+        snap.lane_pid = Some(7);
+        let changes =
+            snap.detect_bounded_with(observation_bounds_from(Some("30"), Some("10")), || {
+                (
+                    vec![win(1, 3, "User", "Main"), win(4, 7, "Target", "Sheet")],
+                    Some(7),
+                )
+            });
+        assert_eq!(changes.new_windows.len(), 1);
+        assert_eq!(changes.new_windows[0].pid, 7);
+        assert!(changes.foreground_changed);
     }
 
     /// The other half of the pair above: a poll that ran is `polled` whether

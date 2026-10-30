@@ -80,6 +80,11 @@ impl Tool for RightClickTool {
         def()
     }
 
+    /// The element path is AXShowMenu under a pid-scoped key-focus guard.
+    fn has_independent_input_lane(&self, args: &Value) -> bool {
+        super::ax_semantic_lane(args)
+    }
+
     async fn invoke(&self, args: Value) -> ToolResult {
         use cua_driver_core::tool_args::ArgsExt;
         let pid = match super::target_pid(&self.state, &args) {
