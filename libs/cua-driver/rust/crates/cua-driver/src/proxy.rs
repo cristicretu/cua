@@ -311,94 +311,105 @@ where
     let mut line = String::new();
     let mut session_observed = false;
     let mut protocol_session = ProtocolSession::default();
+    // Tool calls run concurrently and answer as they finish: JSON-RPC
+    // matches replies by id, and one host serving many agents through one
+    // proxy must not make an agent acting on one app wait for another agent's
+    // call on a different app. The daemon serializes whatever must not
+    // overlap. Everything else (initialize, tools/list, refusals) is answered
+    // in order on this task, so the protocol handshake stays sequential.
+    let mut in_flight: tokio::task::JoinSet<Response> = tokio::task::JoinSet::new();
+    // The request id of each in-flight call, to answer one that panicked.
+    let mut in_flight_ids = std::collections::HashMap::new();
+    let mut reader_done = false;
 
     loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            break; // EOF — MCP client disconnected (stdin closed).
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        debug!(raw = trimmed, "→ proxy request");
-
-        let response = match serde_json::from_str::<Request>(trimmed) {
-            Err(e) => {
-                error!("JSON parse error: {e}");
-                Response::parse_error()
+        let response = if reader_done {
+            match in_flight.join_next_with_id().await {
+                Some(joined) => joined_response(joined, &mut in_flight_ids),
+                None => break,
             }
-            Ok(req) if req.is_notification() => {
-                // Notifications are intentionally dropped by the stdio adapter.
-                continue;
-            }
-            Ok(req) => {
-                let admission = protocol_session.validate(&req).and_then(|era| {
-                    mcp_wire::validate_tool_call(
-                        &req,
-                        req.id.clone().unwrap_or_default(),
-                        era,
-                        cached_tools_list,
-                    )?;
-                    Ok(era)
-                });
-                if let Err(response) = admission {
-                    writer
-                        .write_all(serde_json::to_string(&response)?.as_bytes())
-                        .await?;
-                    writer.write_all(b"\n").await?;
-                    writer.flush().await?;
-                    continue;
+        } else {
+            tokio::select! {
+                Some(joined) = in_flight.join_next_with_id(), if !in_flight.is_empty() => {
+                    joined_response(joined, &mut in_flight_ids)
                 }
-                let initialize_metadata = (!session_observed)
-                    .then(|| req.initialize_metadata())
-                    .flatten();
-                let session_context = (!daemon_observes_tool_calls)
-                    .then(|| {
-                        req.tool_call().ok().and_then(|call| {
-                            let known_tool = proxy_knows_tool(cached_tools_list, &call.name);
-                            cua_driver_core::session::begin_tool_call(
-                                &call.name,
-                                &call.args,
-                                known_tool,
-                                cua_driver_core::session::SessionTransport::McpStdio,
-                                cua_driver_core::session::SessionClientKind::Mcp,
-                            )
-                        })
-                    })
-                    .flatten();
-                let tool_timer = (!daemon_observes_tool_calls)
-                    .then(|| {
-                        tool_observation_timer(
-                            &req,
-                            |name| proxy_knows_tool(cached_tools_list, name),
-                            StdioExecutionPath::DaemonProxy,
-                        )
-                    })
-                    .flatten();
-                let id = req.id.clone().unwrap_or(serde_json::Value::Null);
-                let response = handle_proxy_request(
-                    req,
-                    id,
-                    socket_path,
-                    cached_tools_list,
-                    session_id,
-                    daemon_observes_tool_calls,
-                )
-                .await;
-                if let Some(metadata) = initialize_metadata {
-                    observe_proxy_session_started(metadata);
-                    session_observed = true;
-                }
-                if let Some(timer) = tool_timer {
-                    let outcome = timer.finish(&response);
-                    if let Some(context) = session_context {
-                        context.complete(&outcome);
+                // read_line keeps partial input in `line` when the other
+                // branch wins, so the next iteration continues the same line.
+                read = reader.read_line(&mut line) => {
+                    let n = read?;
+                    if n == 0 {
+                        // EOF — MCP client disconnected (stdin closed). Answer
+                        // the calls already admitted before returning.
+                        reader_done = true;
+                        continue;
                     }
-                    observe_proxy_tool_completed(outcome);
+                    let request = std::mem::take(&mut line);
+                    let trimmed = request.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    debug!(raw = trimmed, "→ proxy request");
+                    match serde_json::from_str::<Request>(trimmed) {
+                        Err(e) => {
+                            error!("JSON parse error: {e}");
+                            Response::parse_error()
+                        }
+                        Ok(req) if req.is_notification() => {
+                            // Notifications are intentionally dropped by the stdio adapter.
+                            continue;
+                        }
+                        Ok(req) => {
+                            let admission = protocol_session.validate(&req).and_then(|era| {
+                                mcp_wire::validate_tool_call(
+                                    &req,
+                                    req.id.clone().unwrap_or_default(),
+                                    era,
+                                    cached_tools_list,
+                                )?;
+                                Ok(era)
+                            });
+                            if let Err(response) = admission {
+                                response
+                            } else if req.tool_call().is_ok() {
+                                let socket_path = socket_path.to_owned();
+                                let cached_tools_list = Arc::clone(cached_tools_list);
+                                let session_id = session_id.to_owned();
+                                let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+                                let task = in_flight.spawn(async move {
+                                    proxy_tool_call(
+                                        req,
+                                        &socket_path,
+                                        &cached_tools_list,
+                                        &session_id,
+                                        daemon_observes_tool_calls,
+                                    )
+                                    .await
+                                });
+                                in_flight_ids.insert(task.id(), id);
+                                continue;
+                            } else {
+                                let initialize_metadata = (!session_observed)
+                                    .then(|| req.initialize_metadata())
+                                    .flatten();
+                                let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+                                let response = handle_proxy_request(
+                                    req,
+                                    id,
+                                    socket_path,
+                                    cached_tools_list,
+                                    session_id,
+                                    daemon_observes_tool_calls,
+                                )
+                                .await;
+                                if let Some(metadata) = initialize_metadata {
+                                    observe_proxy_session_started(metadata);
+                                    session_observed = true;
+                                }
+                                response
+                            }
+                        }
+                    }
                 }
-                response
             }
         };
 
@@ -423,6 +434,77 @@ where
     // `session_end(session_id)` once (idempotent). That single path reliably
     // covers the ungraceful-death case the old best-effort exit hook missed.
     Ok(())
+}
+
+/// One admitted `tools/call`, with the session and telemetry bookkeeping the
+/// sequential loop used to do around it.
+async fn proxy_tool_call(
+    req: Request,
+    socket_path: &str,
+    cached_tools_list: &Arc<serde_json::Value>,
+    session_id: &str,
+    daemon_observes_tool_calls: bool,
+) -> Response {
+    let session_context = (!daemon_observes_tool_calls)
+        .then(|| {
+            req.tool_call().ok().and_then(|call| {
+                let known_tool = proxy_knows_tool(cached_tools_list, &call.name);
+                cua_driver_core::session::begin_tool_call(
+                    &call.name,
+                    &call.args,
+                    known_tool,
+                    cua_driver_core::session::SessionTransport::McpStdio,
+                    cua_driver_core::session::SessionClientKind::Mcp,
+                )
+            })
+        })
+        .flatten();
+    let tool_timer = (!daemon_observes_tool_calls)
+        .then(|| {
+            tool_observation_timer(
+                &req,
+                |name| proxy_knows_tool(cached_tools_list, name),
+                StdioExecutionPath::DaemonProxy,
+            )
+        })
+        .flatten();
+    let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+    let response = handle_proxy_request(
+        req,
+        id,
+        socket_path,
+        cached_tools_list,
+        session_id,
+        daemon_observes_tool_calls,
+    )
+    .await;
+    if let Some(timer) = tool_timer {
+        let outcome = timer.finish(&response);
+        if let Some(context) = session_context {
+            context.complete(&outcome);
+        }
+        observe_proxy_tool_completed(outcome);
+    }
+    response
+}
+
+/// A finished tool call's reply. A call that panicked is answered with an
+/// internal error under its request id, so its client is not left waiting.
+fn joined_response(
+    joined: Result<(tokio::task::Id, Response), tokio::task::JoinError>,
+    ids: &mut std::collections::HashMap<tokio::task::Id, serde_json::Value>,
+) -> Response {
+    match joined {
+        Ok((task, response)) => {
+            ids.remove(&task);
+            response
+        }
+        Err(error) => {
+            error!("proxy tool call failed: {error}");
+            let id = ids.remove(&error.id()).unwrap_or(serde_json::Value::Null);
+            Response::error(id, -32603, "tool call failed inside the proxy")
+        }
+    }
 }
 
 fn proxy_knows_tool(cached_tools_list: &serde_json::Value, name: &str) -> bool {
@@ -1285,6 +1367,74 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert!(!dispatched.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// One proxy serves every agent of an embedding host, so a slow call on
+    /// one app must not hold back a quick call on another: replies come back
+    /// as calls finish, matched by id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proxy_answers_tool_calls_as_they_finish() {
+        use std::io::{BufRead, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("d.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                std::thread::spawn(move || {
+                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    let request: DaemonRequest = serde_json::from_str(&line).unwrap();
+                    let name = request.name.unwrap_or_default();
+                    if name == "slow_tool" {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                    }
+                    let reply = DaemonResponse::ok(serde_json::json!({
+                        "content": [{"type": "text", "text": name}]
+                    }));
+                    let mut stream = stream;
+                    let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap());
+                });
+            }
+        });
+        let mut input = Vec::new();
+        for request in [
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}),
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"slow_tool","arguments":{}}}),
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fast_tool","arguments":{}}}),
+        ] {
+            serde_json::to_writer(&mut input, &request).unwrap();
+            input.push(b'\n');
+        }
+        let inventory =
+            Arc::new(serde_json::json!({"tools":[{"name":"slow_tool"},{"name":"fast_tool"}]}));
+        let mut output = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_proxy_io(
+                BufReader::new(input.as_slice()),
+                &mut output,
+                socket.to_str().unwrap(),
+                &inventory,
+                "concurrent-test",
+                true,
+            ),
+        )
+        .await
+        .expect("EOF waits for in-flight calls, then returns")
+        .unwrap();
+        let ids: Vec<i64> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["id"]
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ids, [1, 3, 2]);
     }
 
     #[tokio::test]
