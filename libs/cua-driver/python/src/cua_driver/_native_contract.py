@@ -1535,9 +1535,214 @@ class _UniffiFfiConverterOptionalTypeActionNextCall(_UniffiConverterRustBuffer):
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
+
+
+
+
+
+class DeliveryDisposition(enum.Enum):
+    """
+    How far a call's input got. The vocabulary follows agent-desktop's
+    `docs/json-output.md` "Disposition values" (Apache-2.0).
+"""
+
+    UNKNOWN = 0
+    """
+    Nothing is known about delivery: an error with no evidence either way.
+"""
+
+    NOT_DELIVERED = 1
+    """
+    Nothing reached the app: a refusal, invalid arguments, a read.
+"""
+
+    DELIVERY_UNCERTAIN = 2
+    """
+    Input was sent and the app answered with an error, or only part of it
+    landed. It may have acted.
+"""
+
+    DELIVERED_UNVERIFIED = 3
+    """
+    Input was sent and nothing confirmed its effect.
+"""
+
+    DELIVERED_VERIFIED = 4
+    """
+    Input was sent and a readback confirmed its effect.
+"""
+
+
+
+class _UniffiFfiConverterTypeDeliveryDisposition(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return DeliveryDisposition.UNKNOWN
+        if variant == 2:
+            return DeliveryDisposition.NOT_DELIVERED
+        if variant == 3:
+            return DeliveryDisposition.DELIVERY_UNCERTAIN
+        if variant == 4:
+            return DeliveryDisposition.DELIVERED_UNVERIFIED
+        if variant == 5:
+            return DeliveryDisposition.DELIVERED_VERIFIED
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == DeliveryDisposition.UNKNOWN:
+            return
+        if value == DeliveryDisposition.NOT_DELIVERED:
+            return
+        if value == DeliveryDisposition.DELIVERY_UNCERTAIN:
+            return
+        if value == DeliveryDisposition.DELIVERED_UNVERIFIED:
+            return
+        if value == DeliveryDisposition.DELIVERED_VERIFIED:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == DeliveryDisposition.UNKNOWN:
+            buf.write_i32(1)
+        if value == DeliveryDisposition.NOT_DELIVERED:
+            buf.write_i32(2)
+        if value == DeliveryDisposition.DELIVERY_UNCERTAIN:
+            buf.write_i32(3)
+        if value == DeliveryDisposition.DELIVERED_UNVERIFIED:
+            buf.write_i32(4)
+        if value == DeliveryDisposition.DELIVERED_VERIFIED:
+            buf.write_i32(5)
+
+
+
+
+
+
+
+
+class RetryDisposition(enum.Enum):
+    """
+    Whether the same call may be repeated without first reading the app.
+"""
+
+    UNKNOWN = 0
+
+    SAFE = 1
+    """
+    Nothing was delivered, so a retry cannot double-fire.
+"""
+
+    UNSAFE = 2
+    """
+    Something may have landed: read the app before repeating anything.
+"""
+
+
+
+class _UniffiFfiConverterTypeRetryDisposition(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return RetryDisposition.UNKNOWN
+        if variant == 2:
+            return RetryDisposition.SAFE
+        if variant == 3:
+            return RetryDisposition.UNSAFE
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == RetryDisposition.UNKNOWN:
+            return
+        if value == RetryDisposition.SAFE:
+            return
+        if value == RetryDisposition.UNSAFE:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == RetryDisposition.UNKNOWN:
+            buf.write_i32(1)
+        if value == RetryDisposition.SAFE:
+            buf.write_i32(2)
+        if value == RetryDisposition.UNSAFE:
+            buf.write_i32(3)
+
+
+
+@dataclass
+class Disposition:
+    """
+    `{delivery, retry}` on a call's structured result.
+"""
+    def __init__(self, *, delivery:DeliveryDisposition, retry:RetryDisposition):
+        self.delivery = delivery
+        self.retry = retry
+
+
+
+
+    def __str__(self):
+        return "Disposition(delivery={}, retry={})".format(self.delivery, self.retry)
+    def __eq__(self, other):
+        if self.delivery != other.delivery:
+            return False
+        if self.retry != other.retry:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeDisposition(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return Disposition(
+            delivery=_UniffiFfiConverterTypeDeliveryDisposition.read(buf),
+            retry=_UniffiFfiConverterTypeRetryDisposition.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterTypeDeliveryDisposition.check_lower(value.delivery)
+        _UniffiFfiConverterTypeRetryDisposition.check_lower(value.retry)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterTypeDeliveryDisposition.write(value.delivery, buf)
+        _UniffiFfiConverterTypeRetryDisposition.write(value.retry, buf)
+
+class _UniffiFfiConverterOptionalTypeDisposition(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeDisposition.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeDisposition.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeDisposition.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 @dataclass
 class ActionResult:
-    def __init__(self, *, effect:ActionEffect, route:ActionRoute, delivery:typing.Optional[ActionDelivery], evidence:typing.Optional[typing.List[ActionEvidence]], escalation:typing.Optional[ActionEscalation], summary:typing.Optional[str], error:typing.Optional[ActionError], hint:typing.Optional[str], next_call:typing.Optional[ActionNextCall]):
+    def __init__(self, *, effect:ActionEffect, route:ActionRoute, delivery:typing.Optional[ActionDelivery], evidence:typing.Optional[typing.List[ActionEvidence]], escalation:typing.Optional[ActionEscalation], summary:typing.Optional[str], error:typing.Optional[ActionError], hint:typing.Optional[str], next_call:typing.Optional[ActionNextCall], disposition:typing.Optional[Disposition]):
         self.effect = effect
         self.route = route
         self.delivery = delivery
@@ -1547,12 +1752,13 @@ class ActionResult:
         self.error = error
         self.hint = hint
         self.next_call = next_call
+        self.disposition = disposition
 
 
 
 
     def __str__(self):
-        return "ActionResult(effect={}, route={}, delivery={}, evidence={}, escalation={}, summary={}, error={}, hint={}, next_call={})".format(self.effect, self.route, self.delivery, self.evidence, self.escalation, self.summary, self.error, self.hint, self.next_call)
+        return "ActionResult(effect={}, route={}, delivery={}, evidence={}, escalation={}, summary={}, error={}, hint={}, next_call={}, disposition={})".format(self.effect, self.route, self.delivery, self.evidence, self.escalation, self.summary, self.error, self.hint, self.next_call, self.disposition)
     def __eq__(self, other):
         if self.effect != other.effect:
             return False
@@ -1572,6 +1778,8 @@ class ActionResult:
             return False
         if self.next_call != other.next_call:
             return False
+        if self.disposition != other.disposition:
+            return False
         return True
 
 class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
@@ -1587,6 +1795,7 @@ class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
             error=_UniffiFfiConverterOptionalTypeActionError.read(buf),
             hint=_UniffiFfiConverterOptionalString.read(buf),
             next_call=_UniffiFfiConverterOptionalTypeActionNextCall.read(buf),
+            disposition=_UniffiFfiConverterOptionalTypeDisposition.read(buf),
         )
 
     @staticmethod
@@ -1600,6 +1809,7 @@ class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeActionError.check_lower(value.error)
         _UniffiFfiConverterOptionalString.check_lower(value.hint)
         _UniffiFfiConverterOptionalTypeActionNextCall.check_lower(value.next_call)
+        _UniffiFfiConverterOptionalTypeDisposition.check_lower(value.disposition)
 
     @staticmethod
     def write(value, buf):
@@ -1612,6 +1822,7 @@ class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeActionError.write(value.error, buf)
         _UniffiFfiConverterOptionalString.write(value.hint, buf)
         _UniffiFfiConverterOptionalTypeActionNextCall.write(value.next_call, buf)
+        _UniffiFfiConverterOptionalTypeDisposition.write(value.disposition, buf)
 
 class _UniffiFfiConverterBoolean:
     @classmethod
@@ -8684,6 +8895,8 @@ __all__ = [
     "ActionEvidenceKind",
     "ActionEffect",
     "ActionRoute",
+    "DeliveryDisposition",
+    "RetryDisposition",
     "ActionTarget",
     "ClickPosition",
     "InputDeliveryMode",
@@ -8714,6 +8927,7 @@ __all__ = [
     "ActionEscalation",
     "ActionEvidence",
     "ActionNextCall",
+    "Disposition",
     "ActionResult",
     "AppInfo",
     "BoundsExpectation",
