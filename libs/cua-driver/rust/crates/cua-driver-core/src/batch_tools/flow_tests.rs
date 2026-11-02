@@ -422,7 +422,16 @@ async fn bad_v2_steps_are_rejected_before_anything_runs() {
             json!({"click": {"app": "Demo", "name": "x"}, "timeout_ms": 99999}),
             "timeout_ms",
         ),
-        (json!({"wait": {"app": "Demo"}}), "cannot run in a batch"),
+        // A wait step is the wait tool's predicate, checked up front.
+        (
+            json!({"wait": {"app": "Demo", "value": "x"}}),
+            "wait: value",
+        ),
+        (
+            json!({"wait": {"app": "Demo"}, "expect": {"text": "x"}}),
+            "a wait step is only",
+        ),
+        (json!({"sleep": {"ms": 5}}), "cannot run in a batch"),
     ] {
         let result = harness
             .run(json!({"steps": [{"press_key": {"key": "a"}}, step.clone()]}))

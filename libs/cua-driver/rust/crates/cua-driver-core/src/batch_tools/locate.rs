@@ -39,6 +39,7 @@ pub(crate) const CHECK_KEYS: &[&str] = &[
     "value_contains",
     "enabled",
     "selected",
+    "count",
     "timeout_ms",
 ];
 
@@ -50,7 +51,9 @@ pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
 pub(crate) const DEFAULT_EXPECT_TIMEOUT_MS: u64 = 2_000;
 /// Longest wait any single check may ask for.
 pub(crate) const MAX_CHECK_TIMEOUT_MS: u64 = 10_000;
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Pause between two reads of a poll. Every read is a full accessibility
+/// walk through the registry, so polling faster only loads the target app.
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CANDIDATES_SHOWN: usize = 5;
 /// Most windows of one app a lookup reads per poll.
 const MAX_WINDOWS_SEARCHED: usize = 4;
@@ -149,6 +152,8 @@ pub(crate) struct Check {
     pub value_contains: Option<String>,
     pub enabled: Option<bool>,
     pub selected: Option<bool>,
+    /// Exactly this many matches (rows for `text`, elements otherwise).
+    pub count: Option<usize>,
     pub timeout: Duration,
 }
 
@@ -176,6 +181,28 @@ impl Check {
         let value_contains = opt_string(object, "value_contains")?;
         let enabled = opt_bool(object, "enabled")?;
         let selected = opt_bool(object, "selected")?;
+        let count =
+            match object.get("count") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    Some(value.as_u64().filter(|count| *count >= 1).ok_or(
+                        "`count` must be an integer of at least 1 (use `gone:true` for none)",
+                    )? as usize)
+                }
+            };
+        if count.is_some()
+            && (gone
+                || element.nth.is_some()
+                || value.is_some()
+                || value_contains.is_some()
+                || enabled.is_some()
+                || selected.is_some())
+        {
+            return Err(
+                "`count` only counts matches; it cannot be combined with gone/nth/value/enabled/selected"
+                    .to_owned(),
+            );
+        }
         if gone
             && (value.is_some()
                 || value_contains.is_some()
@@ -214,6 +241,7 @@ impl Check {
             value_contains,
             enabled,
             selected,
+            count,
             timeout: Duration::from_millis(timeout_ms),
         })
     }
@@ -240,6 +268,9 @@ impl Check {
             } else {
                 ", not selected"
             });
+        }
+        if let Some(count) = self.count {
+            out.push_str(&format!(", {count} time(s)"));
         }
         out
     }
@@ -405,7 +436,7 @@ pub(crate) struct Miss {
 }
 
 impl Miss {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -416,7 +447,7 @@ impl Miss {
     /// Whether polling again can change the answer. A refused or failed
     /// read, or an ambiguous match, will not fix itself, and retrying a
     /// refused read would only repeat the refusal.
-    fn worth_waiting(&self) -> bool {
+    pub fn worth_waiting(&self) -> bool {
         matches!(
             self.code,
             "not_found"
@@ -438,6 +469,9 @@ impl Miss {
 pub(crate) struct Checked {
     pub window: Option<Window>,
     pub observed: Option<String>,
+    /// The element that satisfied a role/name check, as the last read
+    /// returned it (its `element_token` is from that read).
+    pub element: Option<Value>,
     pub waited: Duration,
 }
 
@@ -479,7 +513,12 @@ impl<'a> Locator<'a> {
         args
     }
 
-    async fn call(&self, tool: &str, args: Value) -> Result<Value, String> {
+    /// The hard stop every poll loop of this locator ends by.
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    pub async fn call(&self, tool: &str, args: Value) -> Result<Value, String> {
         let result = self.registry.invoke(tool, self.with_session(args)).await;
         if result.is_error == Some(true) {
             return Err(format!("{tool}: {}", first_text(&result)));
@@ -815,6 +854,7 @@ impl<'a> Locator<'a> {
                 return Ok(Checked {
                     window: None,
                     observed: Some(format!("{} is closed", spec.describe())),
+                    element: None,
                     waited: started.elapsed(),
                 })
             }
@@ -830,10 +870,11 @@ impl<'a> Locator<'a> {
                 Err(miss) => return Err(miss),
             };
             match evaluate(check, &read) {
-                Ok(observed) if !check.gone => {
+                Ok(held) if !check.gone => {
                     return Ok(Checked {
                         window: Some(window.clone()),
-                        observed,
+                        observed: held.observed,
+                        element: held.element,
                         waited: started.elapsed(),
                     })
                 }
@@ -851,6 +892,7 @@ impl<'a> Locator<'a> {
             None => Ok(Checked {
                 window: windows.first().cloned(),
                 observed: None,
+                element: None,
                 waited: started.elapsed(),
             }),
             Some((_, mut miss)) => {
@@ -1091,8 +1133,31 @@ fn pick(read: &Read, spec: &ElementSpec) -> Result<Found, Miss> {
     })
 }
 
-/// `Ok(observed)` when the check holds against this read.
-fn evaluate(check: &Check, read: &Read) -> Result<Option<String>, Miss> {
+/// What a check that holds found.
+#[derive(Debug)]
+struct Held {
+    observed: Option<String>,
+    element: Option<Value>,
+}
+
+impl Held {
+    fn element(element: &Value) -> Self {
+        Self {
+            observed: Some(describe_element(element)),
+            element: Some(element.clone()),
+        }
+    }
+
+    fn row(observed: Option<String>) -> Self {
+        Self {
+            observed,
+            element: None,
+        }
+    }
+}
+
+/// `Ok` when the check holds against this read.
+fn evaluate(check: &Check, read: &Read) -> Result<Held, Miss> {
     let element_spec = ElementSpec {
         nth: None,
         ..check.element.clone()
@@ -1133,7 +1198,7 @@ fn evaluate(check: &Check, read: &Read) -> Result<Option<String>, Miss> {
             )
             .in_window(window))
         } else {
-            Ok(None)
+            Ok(Held::row(None))
         };
     }
     if !present {
@@ -1152,19 +1217,36 @@ fn evaluate(check: &Check, read: &Read) -> Result<Option<String>, Miss> {
         || check.value_contains.is_some()
         || check.enabled.is_some()
         || check.selected.is_some();
+    if let Some(expected) = check.count {
+        let found = if by_text_only || structured.is_empty() {
+            rows.len()
+        } else {
+            structured.len()
+        };
+        if found != expected {
+            return Err(Miss::new(
+                "unexpected_state",
+                format!(
+                    "{} expected in {}, found {found}",
+                    check.describe(),
+                    window.describe()
+                ),
+            )
+            .in_window(window));
+        }
+    }
     if !needs_fields {
-        let observed = structured
-            .first()
-            .map(|element| describe_element(element))
-            .or_else(|| rows.first().map(|row| clip(row, 120)));
-        return Ok(observed);
+        return Ok(match structured.first() {
+            Some(element) => Held::element(element),
+            None => Held::row(rows.first().map(|row| clip(row, 120))),
+        });
     }
     let pool: Vec<&Value> = match check.element.nth {
         Some(nth) => structured.get(nth).copied().into_iter().collect(),
         None => structured.clone(),
     };
     if let Some(element) = pool.iter().find(|element| fields_hold(check, element)) {
-        return Ok(Some(describe_element(element)));
+        return Ok(Held::element(element));
     }
     let shown = pool
         .iter()

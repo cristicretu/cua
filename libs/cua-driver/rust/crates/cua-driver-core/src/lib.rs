@@ -121,6 +121,7 @@ pub mod tool_args;
 pub mod tool_schema;
 pub mod video;
 pub mod video_ffmpeg;
+pub mod wait_tool;
 pub mod walk_budget;
 pub mod window_inspection;
 pub mod window_observation;

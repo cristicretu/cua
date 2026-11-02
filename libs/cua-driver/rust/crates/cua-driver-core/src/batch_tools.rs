@@ -206,12 +206,14 @@ impl Tool for RunStepsTool {
                 WAITS AND CHECKS: a step may add `wait_for` (checked before its action) and \
                 `expect` (one check or up to 4, checked after it); a step may also be only a \
                 check. A check is {role?, name?, text?, gone?, value?, value_contains?, \
-                enabled?, selected?, app?, window?, timeout_ms?}: `text` matches any row of the \
+                enabled?, selected?, count?, app?, window?, timeout_ms?}: `text` matches any row of the \
                 tree, static text included; `gone:true` waits for it to disappear. Checks poll \
                 until they hold or time out (wait_for 5 s, expect 2 s, max 10 s), and a check \
                 that does not hold fails the step with what was found instead. The report says \
                 which step failed, in which phase (wait_for, find, action, expect) and why. \
-                Whole batch: at most 60 s.\n\n\
+                A step may also be `{\"wait\": {...}}` with the wait tool's arguments (a \
+                window opening or closing by app/title, an open menu/sheet/popover/alert via \
+                `surface`, an element `count`, or `ms`). Whole batch: at most 60 s.\n\n\
                 Example (fill a form, submit, confirm the dialog, check the result):\n\
                 {\"steps\":[\
                 {\"set_value\":{\"app\":\"Safari\",\"role\":\"textfield\",\"name\":\"Email\",\"value\":\"ada@example.com\"}},\
@@ -234,7 +236,7 @@ impl Tool for RunStepsTool {
                                 "tool": { "type": "string", "enum": BATCHABLE_TOOLS, "description": "Action tool to run." },
                                 "args": { "type": "object", "description": "Arguments for that tool, as in a direct call, optionally with role/name/nth/app/window to name the target instead of pid/window_id/element_token." },
                                 "wait_for": { "type": "object", "description": "Check that must hold before the action: {role?, name?, text?, gone?, app?, window?, timeout_ms?}. Default timeout 5000 ms." },
-                                "expect": { "type": "array", "maxItems": 4, "items": {"type": "object"}, "description": "Up to 4 checks that must hold after the action: {role?, name?, text?, gone?, value?, value_contains?, enabled?, selected?, app?, window?, timeout_ms?}. Default timeout 2000 ms." },
+                                "expect": { "type": "array", "maxItems": 4, "items": {"type": "object"}, "description": "Up to 4 checks that must hold after the action: {role?, name?, text?, gone?, value?, value_contains?, enabled?, selected?, count?, app?, window?, timeout_ms?}. Default timeout 2000 ms." },
                                 "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 10000, "description": "How long a named target may take to appear. Default 3000." }
                             },
                             "additionalProperties": true
@@ -317,6 +319,9 @@ struct Action {
 
 struct Step {
     action: Option<Action>,
+    /// A `{"wait": {...}}` step: the standalone wait tool's predicate, run in
+    /// the batch's locator. Such a step has nothing else.
+    wait: Option<crate::wait_tool::Wait>,
     wait_for: Option<Check>,
     expect: Vec<Check>,
     /// A read-only tool placed between actions. It cannot change what later
@@ -329,6 +334,7 @@ impl Step {
         match (&self.action, self.skipped_read) {
             (Some(action), _) => action.tool,
             (None, Some(read)) => read,
+            (None, None) if self.wait.is_some() => crate::wait_tool::WAIT_TOOL,
             (None, None) if self.wait_for.is_some() => "wait_for",
             (None, None) => "expect",
         }
@@ -532,6 +538,7 @@ impl Plan {
                 }
                 steps.push(Step {
                     action: None,
+                    wait: None,
                     wait_for: None,
                     expect: Vec::new(),
                     skipped_read: Some(tool),
@@ -551,6 +558,10 @@ impl Plan {
                 .as_ref()
                 .is_some_and(|action| !action.window.is_empty())
                 || step
+                    .wait
+                    .as_ref()
+                    .is_some_and(|wait| !wait.window().is_empty())
+                || step
                     .wait_for
                     .iter()
                     .chain(step.expect.iter())
@@ -559,6 +570,10 @@ impl Plan {
                 .action
                 .as_ref()
                 .is_some_and(|action| !action.element.is_empty() && action.window.is_empty())
+                || step
+                    .wait
+                    .as_ref()
+                    .is_some_and(crate::wait_tool::Wait::needs_window)
                 || step
                     .wait_for
                     .iter()
@@ -861,6 +876,10 @@ async fn run_step(
         };
     }
 
+    if let Some(wait) = &step.wait {
+        return run_wait_step(locator, index, wait, context, last_window).await;
+    }
+
     if let Some(check) = &step.wait_for {
         match locator.check(check, context).await {
             Ok(checked) => {
@@ -1123,6 +1142,70 @@ async fn run_step(
         ),
         report,
         ok: true,
+    }
+}
+
+/// A `{"wait": {...}}` step: the wait tool's predicate against the batch's
+/// window context, inside the batch's time budget.
+async fn run_wait_step(
+    locator: &Locator<'_>,
+    index: usize,
+    wait: &crate::wait_tool::Wait,
+    context: &mut WindowSpec,
+    last_window: &mut Option<Window>,
+) -> StepOutcome {
+    let label = crate::wait_tool::WAIT_TOOL;
+    let named = wait.window();
+    let fallback = if named.is_empty() {
+        last_window
+            .as_ref()
+            .filter(|_| context.is_empty())
+            .map(|window| WindowSpec {
+                pid: Some(window.pid),
+                window_id: Some(window.window_id),
+                ..Default::default()
+            })
+            .unwrap_or_else(|| context.clone())
+    } else {
+        named.clone()
+    };
+    let outcome = crate::wait_tool::run(locator, wait, &fallback).await;
+    let mut report = crate::wait_tool::report(wait, &outcome);
+    report["index"] = json!(index);
+    report["tool"] = json!(label);
+    match outcome {
+        Ok(waited) => {
+            if !named.is_empty() {
+                *context = named;
+            }
+            if let Some(window) = waited.window {
+                *last_window = Some(window);
+            }
+            let note = format!(
+                "waited {} ms for {}",
+                waited.waited.as_millis(),
+                wait.describe()
+            );
+            report["message"] = json!(note);
+            StepOutcome {
+                line: format!("{}. {label} ok: {note}", index + 1),
+                report,
+                ok: true,
+            }
+        }
+        Err(failed) => {
+            if let Some(window) = failed.window.clone() {
+                *last_window = Some(window);
+            }
+            failure(
+                index,
+                label,
+                Phase::WaitFor,
+                failed.code,
+                format!("{} did not hold: {}", wait.describe(), failed.message),
+                report,
+            )
+        }
     }
 }
 
@@ -1629,6 +1712,30 @@ fn parse_step(
             .map_err(|message| PlanError::step(index, format!("expect: {message}")))?],
     };
 
+    if name == Some(crate::wait_tool::WAIT_TOOL) {
+        if wait_for.is_some() || !expect.is_empty() || object.contains_key("timeout_ms") {
+            return Err(PlanError::step(
+                index,
+                "a wait step is only {\"wait\": {...}}; put timeout_ms inside it, and wait_for/expect on an action step",
+            ));
+        }
+        let mut args = match raw_args {
+            None | Some(Value::Null) => Value::Object(Map::new()),
+            Some(value @ Value::Object(_)) => value.clone(),
+            Some(_) => return Err(PlanError::step(index, "`wait` must be an object")),
+        };
+        prepare_args(&mut args, session).map_err(|message| PlanError::step(index, message))?;
+        let wait = crate::wait_tool::Wait::parse(&args)
+            .map_err(|message| PlanError::step(index, format!("wait: {message}")))?;
+        return Ok(Step {
+            action: None,
+            wait: Some(wait),
+            wait_for: None,
+            expect: Vec::new(),
+            skipped_read: None,
+        });
+    }
+
     let action = match name {
         None => {
             if wait_for.is_none() && expect.is_empty() {
@@ -1651,6 +1758,7 @@ fn parse_step(
     };
     Ok(Step {
         action,
+        wait: None,
         wait_for,
         expect,
         skipped_read: None,
