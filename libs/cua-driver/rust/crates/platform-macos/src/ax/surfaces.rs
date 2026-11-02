@@ -78,6 +78,15 @@ pub fn window_surface_kind(role: &str, subrole: Option<&str>) -> Option<&'static
     }
 }
 
+/// Whether a top-level window classified as `kind` is a surface. A dialog
+/// subrole alone does not make a window an alert: System Settings' main
+/// window is an `AXWindow`/`AXDialog` and would be listed as an alert over
+/// itself. A top-level dialog counts unless it reports `AXModal == false`;
+/// an unreadable `AXModal` keeps it, so a real alert is never missed.
+pub fn top_level_surface(kind: &str, modal: Option<bool>) -> bool {
+    kind != "alert" || modal != Some(false)
+}
+
 /// Which listed surface a `surface:<wanted>` read of `window_id` roots at:
 /// an app-level menu (menu-bar first, then context), or a sheet, popover,
 /// alert or focused element that belongs to that window.
@@ -220,11 +229,13 @@ pub(crate) unsafe fn inventory(app: AXUIElementRef, window_filter: Option<u32>) 
             CFRelease(window as CFTypeRef);
             continue;
         }
-        reader.push_if_surface(window, window_id);
+        // Read the children before the window is handed over: push_if_surface
+        // takes ownership, keeping it or releasing it, so the window must not
+        // be touched or released after that call.
         let children = reader.children(window);
-        CFRelease(window as CFTypeRef);
+        reader.push_if_surface(window, window_id, true);
         for child in children {
-            reader.push_if_surface(child, window_id);
+            reader.push_if_surface(child, window_id, false);
         }
     }
     reader.inventory
@@ -311,10 +322,18 @@ impl Reader {
 
     /// Record `element` when it classifies as a window-owned surface;
     /// otherwise release it.
-    unsafe fn push_if_surface(&mut self, element: AXUIElementRef, window_id: Option<u32>) {
+    unsafe fn push_if_surface(
+        &mut self,
+        element: AXUIElementRef,
+        window_id: Option<u32>,
+        top_level: bool,
+    ) {
         let role = self.role(element).unwrap_or_default();
         let subrole = copy_string_attr(element, "AXSubrole");
-        match window_surface_kind(&role, subrole.as_deref()) {
+        let kind = window_surface_kind(&role, subrole.as_deref()).filter(|kind| {
+            !top_level || top_level_surface(kind, copy_bool_attr(element, "AXModal"))
+        });
+        match kind {
             Some(kind) => {
                 let title = title_of(element);
                 self.push(
@@ -375,6 +394,16 @@ mod tests {
             window_id,
             item_count: None,
         }
+    }
+
+    #[test]
+    fn a_non_modal_top_level_dialog_window_is_not_an_alert() {
+        // System Settings' main window: AXWindow / AXDialog, AXModal false.
+        assert!(!top_level_surface("alert", Some(false)));
+        assert!(top_level_surface("alert", Some(true)));
+        // Unreadable modality keeps it: never miss a real alert.
+        assert!(top_level_surface("alert", None));
+        assert!(top_level_surface("sheet", Some(false)));
     }
 
     #[test]
