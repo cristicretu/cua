@@ -42,6 +42,7 @@ evidence rests on. A `refused` result adds `error: {code, hint}`.
 | `error.code` / `error.hint` | only with `effect: refused` |
 | `hint` | optional; one short sentence saying what to do next (see [Recovery hints](#recovery-hints)) |
 | `next_call` | optional; `{tool, arguments}`, a call that is safe to run as is (see [Recovery hints](#recovery-hints)) |
+| `disposition` | `{delivery, retry}`: whether input reached the app and whether a retry is safe (see [Delivery disposition](#delivery-disposition)) |
 | `escalation.target` | `pixel`, `foreground`, `page`, `session` |
 | `escalation.reason` | `route_unavailable`, `delivery_failed`, `effect_unconfirmed`, `suspected_noop`, `permission_required` |
 
@@ -111,6 +112,36 @@ JSON text.
 
 The codes with a hint are listed in the `RULES` table in
 `rust/crates/cua-driver-core/src/recovery_hint.rs`; its tests cover each one.
+
+## Delivery disposition
+
+Every mutating tool's structured result, and every error, carries
+`disposition: {"delivery": ..., "retry": ...}` (vocabulary from
+agent-desktop's `docs/json-output.md`). Read `retry` before repeating a call
+or trying another route.
+
+| `delivery` | Meaning | `retry` |
+|---|---|---|
+| `not_delivered` | nothing reached the app: a refusal, invalid arguments, any error from a read-only tool | `safe` |
+| `delivery_uncertain` | sent, and the app answered with an error or only part landed (`type_text_incomplete`, an AX write that returned `kAXErrorFailure`/`kAXErrorCannotComplete`) | `unsafe` |
+| `delivered_unverified` | sent; nothing confirmed the effect (`effect` `unverifiable` or `suspected_noop`) | `unsafe` |
+| `delivered_verified` | sent and confirmed by a readback (`effect` `confirmed`) | `unsafe` |
+| `unknown` | an error with no evidence either way | `unknown` |
+
+The dispatch seam stamps it once per call, after the recovery hint, so nested
+`run_steps` and `run_script` calls are covered. A refusal with any code is
+`not_delivered` unless the code is one reported after input may have landed
+(`MAY_HAVE_DELIVERED` in `rust/crates/cua-driver-core/src/disposition.rs`). A
+producer that sets its own `disposition` keeps it. Read-only successes carry
+none. Each `run_steps` step report carries its step's disposition, and the
+batch carries the aggregate: `not_delivered` only when no step sent anything.
+`run_steps` never retries a step (stale-token re-find, menu-bar route,
+foreground fallback) whose disposition says a retry is unsafe.
+
+On macOS an AX write the app answered with `kAXErrorInvalidUIElement` refuses
+as `stale_element_token`; `kAXErrorCannotComplete` refuses as
+`app_unresponsive` and `kAXErrorFailure` as `ax_action_failed`, both
+`delivery_uncertain`.
 
 ### Batching suggestion
 

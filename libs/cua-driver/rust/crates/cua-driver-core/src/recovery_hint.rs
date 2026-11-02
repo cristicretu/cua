@@ -564,7 +564,12 @@ static RULES: &[Rule] = &[
         },
     },
     Rule {
-        codes: &["delivery_failed", "foreground_partial_unknown"],
+        codes: &[
+            "delivery_failed",
+            "foreground_partial_unknown",
+            "ax_action_failed",
+            "app_unresponsive",
+        ],
         build: |c| {
             RecoveryHint::new(
                 "The input may have partly landed. Read the window before repeating anything.",
@@ -963,7 +968,7 @@ fn effect_hint(c: &Ctx, effect: &str) -> Option<RecoveryHint> {
 
 /// The refusal code in a structured payload: the top-level `code`, the
 /// browser refusal's `refusal.code`, or a refused action's `error.code`.
-fn code_of(structured: &Map<String, Value>) -> Option<&str> {
+pub(crate) fn code_of(structured: &Map<String, Value>) -> Option<&str> {
     structured
         .get("code")
         .and_then(Value::as_str)

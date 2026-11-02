@@ -159,6 +159,7 @@ Action facts are not task outcomes:
 | `escalation`         | Suggested next route/reason, never authorization or an automatic retry                                |
 | `hint`               | One sentence on what to do next; see [Refusals and hints](#refusals-and-hints)                        |
 | `next_call`          | `{tool, arguments}` safe to run as is; see [Refusals and hints](#refusals-and-hints)                  |
+| `disposition`        | `{delivery, retry}`: did input reach the app; repeat the call only when `retry` is `safe`             |
 
 Successful action escalation uses `target` (`pixel`, `foreground`, or `page`) and `reason` (`route_unavailable`, `delivery_failed`, `effect_unconfirmed`, `suspected_noop`, or `permission_required`). Error diagnostics may have a different shape; inspect their code and current schema. Missing action facts are not confirmation.
 

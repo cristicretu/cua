@@ -142,6 +142,61 @@
               "null"
             ]
           },
+          "disposition": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  }
+                ]
+              },
+              "retry": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "const": "safe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unsafe",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "retry"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "effect": {
             "enum": [
               "confirmed",
@@ -577,6 +632,61 @@
             },
             "required": [
               "mode"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "disposition": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  }
+                ]
+              },
+              "retry": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "const": "safe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unsafe",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "retry"
             ],
             "type": [
               "object",
@@ -2135,6 +2245,61 @@
               "null"
             ]
           },
+          "disposition": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  }
+                ]
+              },
+              "retry": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "const": "safe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unsafe",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "retry"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "effect": {
             "enum": [
               "confirmed",
@@ -2360,6 +2525,61 @@
             },
             "required": [
               "mode"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "disposition": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  }
+                ]
+              },
+              "retry": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "const": "safe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unsafe",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "retry"
             ],
             "type": [
               "object",
@@ -2990,6 +3210,61 @@
             },
             "required": [
               "mode"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "disposition": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  }
+                ]
+              },
+              "retry": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "const": "safe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unsafe",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "retry"
             ],
             "type": [
               "object",
@@ -3739,6 +4014,61 @@
               "null"
             ]
           },
+          "disposition": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  }
+                ]
+              },
+              "retry": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "const": "safe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unsafe",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "retry"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "effect": {
             "enum": [
               "confirmed",
@@ -4008,6 +4338,61 @@
             },
             "required": [
               "mode"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "disposition": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  }
+                ]
+              },
+              "retry": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "const": "safe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unsafe",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "retry"
             ],
             "type": [
               "object",
@@ -4662,6 +5047,61 @@
               "null"
             ]
           },
+          "disposition": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  }
+                ]
+              },
+              "retry": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "const": "safe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unsafe",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "retry"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "effect": {
             "enum": [
               "confirmed",
@@ -5302,6 +5742,61 @@
             },
             "required": [
               "mode"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "disposition": {
+            "additionalProperties": false,
+            "properties": {
+              "delivery": {
+                "oneOf": [
+                  {
+                    "const": "unknown",
+                    "type": "string"
+                  },
+                  {
+                    "const": "not_delivered",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivery_uncertain",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_unverified",
+                    "type": "string"
+                  },
+                  {
+                    "const": "delivered_verified",
+                    "type": "string"
+                  }
+                ]
+              },
+              "retry": {
+                "oneOf": [
+                  {
+                    "enum": [
+                      "unknown"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "const": "safe",
+                    "type": "string"
+                  },
+                  {
+                    "const": "unsafe",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "delivery",
+              "retry"
             ],
             "type": [
               "object",

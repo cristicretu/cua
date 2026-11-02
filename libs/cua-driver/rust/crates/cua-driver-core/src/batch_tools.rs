@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 
 use crate::{
+    disposition::{Disposition, RetryDisposition},
     protocol::{Content, ToolResult},
     recording_tools::ReplayRegistrySlot,
     tool::{Tool, ToolDef, ToolRegistry},
@@ -713,12 +714,21 @@ impl Plan {
         }
 
         let executed = reports.len();
+        // The batch as a whole: safe to resend only when no step delivered.
+        // A step without one (a skipped read) sent nothing.
+        let disposition = crate::disposition::aggregate(reports.iter().map(|report| {
+            report
+                .get("disposition")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_else(Disposition::not_delivered)
+        }));
         let mut structured = json!({
             "ok": failed_step.is_none(),
             "total": total,
             "executed": executed,
             "failed_step": failed_step,
             "steps": reports,
+            "disposition": disposition,
         });
         let header = match failed_step {
             None => format!("run_steps: {total}/{total} steps ok"),
@@ -976,14 +986,22 @@ async fn run_step(
 
         let mut result = registry.invoke(tool, args.clone()).await;
         let mut refound_note = None;
-        if result.is_error == Some(true) && tool == "click" {
+        // Every retry below is a second attempt at the same action. After a
+        // failure that may already have landed (an AX write the app answered
+        // with an error), a second mechanism could double-fire it, so none
+        // runs; the step fails with that disposition instead.
+        let retry_allowed = |result: &ToolResult| {
+            crate::disposition::of_result(result)
+                .is_none_or(|disposition| disposition.retry != RetryDisposition::Unsafe)
+        };
+        if result.is_error == Some(true) && tool == "click" && retry_allowed(&result) {
             if let Some((menu_args, note)) = menu_bar_route(&args, &result) {
                 report["refound"] = json!(note);
                 result = registry.invoke("invoke_menu", menu_args).await;
                 refound_note = Some(note);
             }
         }
-        if result.is_error == Some(true) && refound_note.is_none() {
+        if result.is_error == Some(true) && refound_note.is_none() && retry_allowed(&result) {
             if let Some((retry, note)) = refind_stale_target(locator, &args, &result).await {
                 report["refound"] = json!(note);
                 result = registry.invoke(tool, retry).await;
@@ -991,6 +1009,7 @@ async fn run_step(
             }
         }
         let wants_foreground = result.is_error == Some(true)
+            && retry_allowed(&result)
             && wants_foreground(&result)
             && args.get("delivery_mode").is_none()
             && accepts(registry, tool, "delivery_mode");
@@ -1022,6 +1041,16 @@ async fn run_step(
         }
         report["ok"] = json!(ok);
         report["message"] = json!(message);
+        // Whether this step's input reached the app, as the dispatch seam
+        // stamped it on the step's own result.
+        // A text-only success carries none; it is placed here from the
+        // tool's definition so the batch total still counts it.
+        let read_only = registry.get_def(tool).is_some_and(|def| def.read_only);
+        let disposition = crate::disposition::of_result(&result)
+            .or_else(|| crate::disposition::derive(read_only, !ok, None));
+        if let Some(disposition) = disposition {
+            report["disposition"] = json!(disposition);
+        }
         if !ok {
             if let Some(code) = result
                 .structured_content
@@ -1137,6 +1166,11 @@ fn failure(
     report["ok"] = json!(false);
     report["code"] = json!(code);
     report["message"] = json!(message);
+    // A budget, wait_for or find failure stops before the action, so nothing
+    // was sent. An expect failure keeps the disposition its action reported.
+    if report.get("disposition").is_none() {
+        report["disposition"] = json!(Disposition::not_delivered());
+    }
     StepOutcome {
         line: format!(
             "{}. {label} ERROR ({}): {message}",
