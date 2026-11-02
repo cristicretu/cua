@@ -34,6 +34,9 @@ pub const BATCHABLE_TOOLS: &[&str] = &[
     "double_click",
     "right_click",
     "set_value",
+    "set_state",
+    "clear_value",
+    "scroll_to",
     "type_text",
     "press_key",
     "hotkey",
@@ -56,6 +59,8 @@ const TOOL_ALIASES: &[(&str, &str)] = &[
     ("keypress", "press_key"),
     ("type", "type_text"),
     ("set", "set_value"),
+    ("clear", "clear_value"),
+    ("scroll_into_view", "scroll_to"),
     ("hover", "move_cursor"),
     ("mouse_move", "move_cursor"),
 ];
@@ -165,7 +170,8 @@ impl Tool for RunStepsTool {
                 one call instead of five. Even a single step plus `observe:{}` replaces an \
                 action call followed by a get_window_state call. \
                 Each step is `{tool, args}` where `tool` is one of click, double_click, \
-                right_click, set_value, type_text, press_key, hotkey, scroll, drag, move_cursor \
+                right_click, set_value, set_state, clear_value, scroll_to, type_text, press_key, hotkey, \
+                scroll, drag, move_cursor \
                 and `args` are exactly that tool's arguments. `pid` and `window_id` (or `app`/\
                 `window`) on run_steps itself are the default window of every step that names \
                 none. Reads (get_window_state, zoom) do not run between steps: one there is \

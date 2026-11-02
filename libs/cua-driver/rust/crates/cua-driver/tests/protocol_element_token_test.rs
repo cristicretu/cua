@@ -46,6 +46,12 @@ fn token_accepting_tools_advertise_element_token_in_schema_and_capabilities() {
         "type_text",
         "press_key",
         "set_value",
+        #[cfg(target_os = "macos")]
+        "set_state",
+        #[cfg(target_os = "macos")]
+        "clear_value",
+        #[cfg(target_os = "macos")]
+        "scroll_to",
     ];
 
     for tool_name in TOKEN_TOOLS {

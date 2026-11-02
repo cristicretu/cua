@@ -693,7 +693,8 @@ fn deprecated_name_note(old: &str, new: &str) -> String {
 /// - `accessibility.tree`, `accessibility.tree.structured`,
 ///   `accessibility.tree.bounded`, `accessibility.window_state`,
 ///   `accessibility.element_tokens` (Surface 6 — tool accepts the
-///   opaque `element_token` arg)
+///   opaque `element_token` arg), `accessibility.element_state` (tool
+///   puts one element into a named state and reads it back)
 /// - `app.launch`, `app.list`, `app.kill`, `window.list`,
 ///   `window.activate`, `window.frame.set`, `window.debug_info`
 /// - `system.permissions.tcc`,
@@ -767,6 +768,12 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
             // typing surface, even though the implementation skips
             // per-key events.
             "input.keyboard.type",
+            "accessibility.element_tokens",
+        ],
+        // Semantic state changes on one token-addressed element (checked,
+        // expanded, focused, emptied, scrolled into view), each read back.
+        "set_state" | "clear_value" | "scroll_to" => &[
+            "accessibility.element_state",
             "accessibility.element_tokens",
         ],
 
@@ -3387,6 +3394,9 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "set_state"
+            | "clear_value"
+            | "scroll_to"
             | "bring_to_front"
             | "set_window_frame"
     )
@@ -6486,6 +6496,7 @@ fn synthesize_action_label(tool_name: &str, args: &Value) -> String {
         ),
         "drag" => "drag".into(),
         "set_value" => arg("value").unwrap_or_default(),
+        "set_state" => arg("state").unwrap_or_default(),
         "launch_app" => arg("bundle_id").or_else(|| arg("name")).unwrap_or_default(),
         _ => String::new(),
     };
@@ -6627,6 +6638,9 @@ mod capability_tests {
         "press_key",
         "hotkey",
         "set_value",
+        "set_state",
+        "clear_value",
+        "scroll_to",
         // screen
         "zoom",
         "get_screen_size",
@@ -6724,6 +6738,7 @@ mod capability_tests {
         // Surface 6 — claimed by tools that accept the opaque
         // `element_token` arg + get_window_state which emits them.
         "accessibility.element_tokens",
+        "accessibility.element_state",
         // app / window
         "app.launch",
         "app.list",
@@ -6923,6 +6938,9 @@ mod capability_tests {
             "type_text_chars",
             "press_key",
             "set_value",
+            "set_state",
+            "clear_value",
+            "scroll_to",
             // get_window_state emits the tokens — same capability
             // claim, from the other side of the contract.
             "get_window_state",
