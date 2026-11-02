@@ -283,6 +283,9 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "set_state",
+    "clear_value",
+    "scroll_to",
     "bring_to_front",
     "set_window_frame",
 ];
@@ -894,6 +897,9 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "press_key"
         | "hotkey"
         | "set_value"
+        | "set_state"
+        | "clear_value"
+        | "scroll_to"
         | "run_steps"
         | "run_script"
         | "invoke_menu"
@@ -1198,6 +1204,9 @@ fn enforce_hard_invariants(
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "set_state"
+            | "clear_value"
+            | "scroll_to"
             | "kill_app"
             | "bring_to_front"
             | "get_accessibility_tree"

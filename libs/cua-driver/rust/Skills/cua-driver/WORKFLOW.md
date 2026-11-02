@@ -68,6 +68,8 @@ cua-driver click '{"target":{"kind":"window","pid":844,"window_id":10725},"eleme
 | Insert text                     | `type_text` with `element_token` and `text`                                    |
 | Focus a visible field and type  | `type_text` with `x,y,text`, when that form is advertised                      |
 | Replace an exposed native value | `set_value` with `pid,element_token,value` (its own schema, no `target`)       |
+| Check / expand / focus          | `set_state` with `element_token` and `state` (`checked`, `unchecked`, `toggled`, `expanded`, `collapsed`, `focused`; macOS). Reads the state first and back after; an already-held state sends nothing |
+| Empty a field / reveal a row    | `clear_value` / `scroll_to` with `element_token` (macOS); `clear_value` never echoes the value |
 | Send a key or combination       | `press_key` with `key`, or `hotkey` with `keys`                                |
 | Scroll / drag                   | `scroll` takes `direction` and `amount` (wheel notches); signed `dx`/`dy` is converted (positive `dy` is down; up to 50 is notches, more is pixels at 100 px per notch). Inspect `describe drag` |
 
@@ -90,7 +92,7 @@ cua-driver run_steps '{"session":"run-1","steps":[
  ],"delay_ms":100,"observe":{}}'
 ```
 
-- `tool` is one of `click`, `double_click`, `right_click`, `set_value`, `type_text`, `press_key`, `hotkey`, `scroll`, `drag`, `move_cursor` (`press` and `type` are accepted for `press_key` and `type_text`, `triple_click` is a click with `count:3`, and a key name such as `down` as the tool is a `press_key`); `args` are exactly that tool's arguments. Observation tools do not run inside a batch: a read between actions is skipped (it could not change the later steps), a `get_window_state` as the last step is the observation (merged with `observe`), and a trailing `zoom` runs after it. Run `describe run_steps` and `describe <tool>` for schemas. Up to 64 steps. `delivery_mode` on `run_steps` is the default for steps that set none.
+- `tool` is one of `click`, `double_click`, `right_click`, `set_value`, `set_state`, `clear_value`, `scroll_to`, `type_text`, `press_key`, `hotkey`, `scroll`, `drag`, `move_cursor` (`press` and `type` are accepted for `press_key` and `type_text`, `triple_click` is a click with `count:3`, and a key name such as `down` as the tool is a `press_key`); `args` are exactly that tool's arguments. Observation tools do not run inside a batch: a read between actions is skipped (it could not change the later steps), a `get_window_state` as the last step is the observation (merged with `observe`), and a trailing `zoom` runs after it. Run `describe run_steps` and `describe <tool>` for schemas. Up to 64 steps. `delivery_mode` on `run_steps` is the default for steps that set none.
 - Name the window once: `pid` and `window_id` (or `app`/`window`) on `run_steps` itself are the default for every step that names none.
 - A step whose `element_token` went stale because an earlier step re-rendered the window is retried once on the element with the same role and label in a fresh read, when exactly one matches; the step's line says so.
 - Every step is validated before the first runs, so a malformed step changes nothing. Each step then passes the same session, permission, capability-manifest and approval checks as a direct call; a batch grants nothing a single call lacks, and a refused step ends the batch like any other failure.

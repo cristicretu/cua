@@ -103,6 +103,7 @@ pub mod recovery_hint;
 pub mod ref_identity;
 #[cfg(feature = "script")]
 pub mod script_tool;
+pub mod semantic_state;
 pub mod server;
 pub mod session;
 pub mod session_authorization;

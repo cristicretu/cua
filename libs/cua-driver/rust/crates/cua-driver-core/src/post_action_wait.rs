@@ -39,6 +39,9 @@ pub const POST_ACTION_WAIT_TOOLS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "set_state",
+    "clear_value",
+    "scroll_to",
 ];
 
 /// Whether this platform's adapter implements `"none"`.

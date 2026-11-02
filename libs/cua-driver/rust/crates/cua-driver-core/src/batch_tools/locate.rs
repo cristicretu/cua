@@ -989,6 +989,7 @@ fn narrow<'r>(found: Vec<&'r Value>, spec: &ElementSpec) -> Vec<&'r Value> {
     } else if let Some(action) = spec.action {
         let usable: &[&str] = match action {
             "set_value" | "type_text" => &["textfield", "popupbutton", "checkbox", "slider"],
+            "clear_value" => &["textfield", "popupbutton"],
             _ => &[],
         };
         let rule: Box<dyn Fn(&Value) -> bool> = if usable.is_empty() {

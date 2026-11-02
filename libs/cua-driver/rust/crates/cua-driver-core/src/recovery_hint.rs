@@ -887,6 +887,9 @@ const ACTION_TOOLS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "set_state",
+    "clear_value",
+    "scroll_to",
     "set_window_frame",
     "invoke_menu",
     "browser_click",
@@ -948,6 +951,10 @@ fn effect_hint(c: &Ctx, effect: &str) -> Option<RecoveryHint> {
         ("set_value", _) => {
             "The value was written but not read back. Read the element again to confirm it before relying \
              on it."
+        }
+        ("set_state" | "clear_value" | "scroll_to", _) => {
+            "The change was sent but the element's state could not be read back. Read the element \
+             again to confirm it before relying on it."
         }
         ("invoke_menu", _) => {
             "The menu item was invoked but its effect is not confirmed. Read the window for a new dialog \

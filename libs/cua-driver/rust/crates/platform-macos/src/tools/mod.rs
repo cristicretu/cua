@@ -17,6 +17,8 @@ mod menu_equivalent;
 mod press_key;
 mod right_click;
 mod scroll;
+mod scroll_to;
+mod set_state;
 mod set_value;
 mod set_window_frame;
 mod type_text;
@@ -26,6 +28,7 @@ mod type_text;
 // etc.) live elsewhere under CuaDriverCore::Capture and are reached
 // through GetWindowStateTool.
 mod check_permissions;
+mod clear_value;
 mod cursor_tools;
 mod desktop_pointer_guard;
 mod get_accessibility_tree;
@@ -1265,6 +1268,18 @@ pub fn register_all(
     ));
     registry.register(pid_window_guarded(
         scroll::ScrollTool::new(state.clone()),
+        &pid_window_candidates,
+    ));
+    registry.register(pid_window_guarded(
+        set_state::SetStateTool::new(state.clone()),
+        &pid_window_candidates,
+    ));
+    registry.register(pid_window_guarded(
+        clear_value::ClearValueTool::new(state.clone()),
+        &pid_window_candidates,
+    ));
+    registry.register(pid_window_guarded(
+        scroll_to::ScrollToTool::new(state.clone()),
         &pid_window_candidates,
     ));
     cua_driver_core::clipboard::register_clipboard_tools(
