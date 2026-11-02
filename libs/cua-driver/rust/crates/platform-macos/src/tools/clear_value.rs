@@ -140,6 +140,13 @@ unsafe fn clear_blocking(
     pid: i32,
     web: bool,
 ) -> (SemanticOutcome, bool, crate::document_edit::DocumentEdited) {
+    if super::set_state::element_is_gone(element) {
+        return (
+            SemanticOutcome::Failed(semantic_state::Failure::Stale, None),
+            web,
+            crate::document_edit::DocumentEdited::NotADocument,
+        );
+    }
     let secure = copy_string_attr(element, "AXSubrole").as_deref() == Some("AXSecureTextField");
     let facts = ClearFacts {
         role: copy_string_attr(element, "AXRole").unwrap_or_default(),

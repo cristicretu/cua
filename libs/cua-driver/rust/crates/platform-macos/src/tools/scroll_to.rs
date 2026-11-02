@@ -165,6 +165,9 @@ unsafe fn in_view(element: AXUIElementRef, window_id: u32) -> Option<bool> {
 ///
 /// `element` must stay retained for the call.
 unsafe fn scroll_to_blocking(element: AXUIElementRef, window_id: u32) -> SemanticOutcome {
+    if super::set_state::element_is_gone(element) {
+        return SemanticOutcome::Failed(semantic_state::Failure::Stale, None);
+    }
     if in_view(element, window_id) == Some(true) {
         return SemanticOutcome::AlreadySatisfied;
     }

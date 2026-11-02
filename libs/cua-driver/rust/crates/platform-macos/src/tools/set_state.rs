@@ -184,6 +184,9 @@ unsafe fn set_state_blocking(
     requested: RequestedState,
     web: bool,
 ) -> SemanticOutcome {
+    if element_is_gone(element) {
+        return SemanticOutcome::Failed(Failure::Stale, None);
+    }
     let plan = match requested {
         RequestedState::Checked | RequestedState::Unchecked | RequestedState::Toggled => {
             semantic_state::plan_check(requested, &toggle_facts(element))
@@ -297,6 +300,29 @@ pub(super) fn settle(read: impl Fn() -> Option<bool>, desired: bool) -> Option<b
             std::thread::sleep(SETTLE_POLL);
         }
     }
+}
+
+/// Whether the element is gone: its role read fails with `-25202`
+/// (kAXErrorInvalidUIElement). Every other read hides that error as `None`,
+/// which would turn a dead element into a misleading role refusal.
+///
+/// # Safety
+///
+/// `element` must stay retained for the call.
+pub(super) unsafe fn element_is_gone(element: AXUIElementRef) -> bool {
+    use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
+    use core_foundation::string::CFString;
+    let attr = CFString::new("AXRole");
+    let mut value: CFTypeRef = std::ptr::null();
+    let err = crate::ax::bindings::AXUIElementCopyAttributeValue(
+        element,
+        attr.as_concrete_TypeRef(),
+        &mut value,
+    );
+    if !value.is_null() {
+        CFRelease(value);
+    }
+    err == crate::ax::bindings::kAXErrorInvalidUIElement
 }
 
 unsafe fn role_of(element: AXUIElementRef) -> String {
