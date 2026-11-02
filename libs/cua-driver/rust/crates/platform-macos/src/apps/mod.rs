@@ -699,6 +699,18 @@ fn bundle_id_for_app_path(app_path: &str) -> Option<String> {
     plist_string(&read_bundle_plist(&path)?, "CFBundleIdentifier")
 }
 
+/// Kernel-truth identity of one pid for the protected-process check in
+/// `close_app` / `kill_app`: executable path from `proc_pidpath` and, when it
+/// lives in an `.app` bundle, the bundle's `CFBundleIdentifier`. Neither
+/// depends on AppKit's workspace cache, which freezes in a daemon.
+pub(crate) fn process_identity_of_pid(pid: i32) -> (Option<String>, Option<String>) {
+    let Some(path) = path_of_pid(pid) else {
+        return (None, None);
+    };
+    let bundle_id = bundle_root_of_executable(&path).and_then(bundle_id_for_app_path);
+    (Some(path), bundle_id)
+}
+
 /// Return all apps: running apps merged with installed-but-not-running apps.
 ///
 /// Single flat array. Each entry carries:

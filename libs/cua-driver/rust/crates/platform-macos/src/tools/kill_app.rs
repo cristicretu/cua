@@ -27,8 +27,10 @@ fn def() -> &'static ToolDef {
         name: "kill_app".into(),
         description: "Force-terminate a process by pid (kill -9 equivalent on macOS / Linux; \
              taskkill /F equivalent on Windows). Use as escalation when the cooperative \
-             close path (hotkey cmd+q on macOS, click-the-X on Windows) failed to make \
-             the process exit. Unsaved state is lost — prefer the cooperative path first."
+             close path (close_app on macOS, click-the-X on Windows) failed to make \
+             the process exit. Unsaved state is lost — prefer the cooperative path first. \
+             Session-critical system processes (Finder, Dock, WindowServer, loginwindow, ...) \
+             are always refused."
             .into(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -56,41 +58,12 @@ impl Tool for KillAppTool {
         adapter_id: &str,
         args: &Value,
     ) -> Result<Option<Value>, String> {
-        if adapter_id != "process_control" {
-            return Ok(None);
-        }
-        let pid = args
-            .get("pid")
-            .and_then(Value::as_i64)
-            .filter(|pid| *pid > 0)
-            .ok_or_else(|| "kill_app requires a positive integer pid".to_owned())?;
-        let fingerprint = crate::browser::MacOsBrowserPlatform::default()
-            .process_fingerprint(pid)
-            .await
-            .map_err(|error| error.message)?;
-        Ok(Some(serde_json::json!({
-            "kind": "process_instance",
-            "fingerprint": fingerprint,
-        })))
+        process_control_scope("kill_app", adapter_id, args).await
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
-        if let Some(expected) = args.get("_protected_process_fingerprint") {
-            let current = match self
-                .protected_resource_scope("process_control", &args)
-                .await
-            {
-                Ok(Some(scope)) => scope["fingerprint"].clone(),
-                Ok(None) => Value::Null,
-                Err(message) => {
-                    return stale_process_refusal(message);
-                }
-            };
-            if current != *expected {
-                return stale_process_refusal(
-                    "the process identity changed at the termination boundary".to_owned(),
-                );
-            }
+        if let Err(refusal) = recheck_protected_fingerprint("kill_app", &args).await {
+            return refusal;
         }
         let pid_i = match args.get("pid").and_then(|v| v.as_i64()) {
             Some(p) if p > 0 && p <= i32::MAX as i64 => p as i32,
@@ -103,6 +76,15 @@ impl Tool for KillAppTool {
                 )
             }
         };
+
+        // Session-critical processes (loginwindow, WindowServer, Dock, ...)
+        // are refused before any signal, in every permission mode.
+        if let Some(refusal) = cua_driver_core::protected_process::refusal(
+            "kill_app",
+            &super::close_app::process_facts(pid_i),
+        ) {
+            return refusal;
+        }
 
         // libc::kill is fast and synchronous; no need to spawn_blocking.
         // Returns 0 on success, -1 on error (errno).
@@ -121,6 +103,54 @@ impl Tool for KillAppTool {
             ))
         }
     }
+}
+
+/// The `process_control` resource scope shared by `kill_app` and
+/// `close_app`: the exact process instance (pid + start time + executable)
+/// the authorization layer grants termination of.
+pub(super) async fn process_control_scope(
+    tool: &str,
+    adapter_id: &str,
+    args: &Value,
+) -> Result<Option<Value>, String> {
+    if adapter_id != "process_control" {
+        return Ok(None);
+    }
+    let pid = args
+        .get("pid")
+        .and_then(Value::as_i64)
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| format!("{tool} requires a positive integer pid"))?;
+    let fingerprint = crate::browser::MacOsBrowserPlatform::default()
+        .process_fingerprint(pid)
+        .await
+        .map_err(|error| error.message)?;
+    Ok(Some(serde_json::json!({
+        "kind": "process_instance",
+        "fingerprint": fingerprint,
+    })))
+}
+
+/// Refuse when the process the authorization layer approved is no longer the
+/// one at `pid` (it exited and the pid was reused).
+pub(super) async fn recheck_protected_fingerprint(
+    tool: &str,
+    args: &Value,
+) -> Result<(), ToolResult> {
+    let Some(expected) = args.get("_protected_process_fingerprint") else {
+        return Ok(());
+    };
+    let current = match process_control_scope(tool, "process_control", args).await {
+        Ok(Some(scope)) => scope["fingerprint"].clone(),
+        Ok(None) => Value::Null,
+        Err(message) => return Err(stale_process_refusal(message)),
+    };
+    if current != *expected {
+        return Err(stale_process_refusal(
+            "the process identity changed at the termination boundary".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn stale_process_refusal(message: String) -> ToolResult {

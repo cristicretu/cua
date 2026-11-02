@@ -61,6 +61,14 @@ pub const MAY_HAVE_DELIVERED: &[&str] = &[
     "app_unresponsive",
     // AppKit returns "unsupported" from presses it performed (#3835).
     "ax_action_unsupported",
+    // set_state: a press ran and the old state reads back (a second press
+    // would toggle again), or a mechanism failed in a way that may have acted.
+    "state_not_reached",
+    "delivery_uncertain",
+    // set_window_state wrote the attribute and the window did not follow.
+    "window_state_not_reached",
+    // close_app asked the app to quit; it may still be saving or prompting.
+    "app_still_running",
 ];
 
 /// The disposition a structured result already declares, when it is valid.

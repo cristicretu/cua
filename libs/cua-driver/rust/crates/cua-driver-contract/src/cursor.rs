@@ -461,6 +461,7 @@ pub fn classify_cursor_semantics(name: &str, args: &Value) -> Option<CursorSeman
         | "get_accessibility_tree"
         | "get_ax_tree"
         | "get_screen_size"
+        | "list_displays"
         | "get_cursor_position"
         | "screenshot"
         | "zoom"
@@ -488,7 +489,9 @@ pub fn classify_cursor_semantics(name: &str, args: &Value) -> Option<CursorSeman
         }
 
         "launch_app" | "activate_app" | "bring_to_front" | "set_window_frame" | "invoke_menu"
-        | "list_apps" | "list_windows" | "kill_app" => CursorAction::App,
+        | "list_apps" | "list_windows" | "kill_app" | "close_app" | "set_window_state" => {
+            CursorAction::App
+        }
 
         "upload_file" | "download_file" | "copy_file" | "move_file" => CursorAction::Transfer,
 
@@ -512,7 +515,10 @@ pub fn classify_cursor_semantics(name: &str, args: &Value) -> Option<CursorSeman
 
     let target = if name.starts_with("browser_") {
         Some(CursorTarget::Browser)
-    } else if matches!(name, "set_window_frame" | "invoke_menu") {
+    } else if matches!(
+        name,
+        "set_window_frame" | "set_window_state" | "invoke_menu"
+    ) {
         Some(CursorTarget::Desktop)
     } else if args
         .get("element_token")

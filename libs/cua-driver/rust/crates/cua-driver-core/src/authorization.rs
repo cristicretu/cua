@@ -289,6 +289,7 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "scroll_to",
     "bring_to_front",
     "set_window_frame",
+    "set_window_state",
 ];
 const DESKTOP_INPUT_SCOPE_KEYS: &[&str] = &[
     "daemon_generation",
@@ -370,7 +371,7 @@ const BROWSER_BOUND_INPUT_SCOPE_KEYS: &[&str] = &[
     "user_policy_sha256",
 ];
 
-const PROCESS_CONTROL_OPERATIONS: &[&str] = &["kill_app"];
+const PROCESS_CONTROL_OPERATIONS: &[&str] = &["kill_app", "close_app"];
 const PROCESS_CONTROL_SCOPE_KEYS: &[&str] = &[
     "daemon_generation",
     "public_session",
@@ -606,7 +607,7 @@ pub const ENFORCEMENT_ADAPTERS: &[EnforcementAdapterDescriptor] = &[
     },
     EnforcementAdapterDescriptor {
         id: "clipboard",
-        operations: &["clipboard_read", "clipboard_write"],
+        operations: &["clipboard_read", "clipboard_write", "clipboard_clear"],
         state: RiskEnforcement::Active,
         risk_class: RiskClass::R2,
         resource_kind: "system_clipboard",
@@ -772,7 +773,10 @@ pub fn enforcement_adapters_for_call(
         add("desktop_input");
     }
 
-    if matches!(tool, "clipboard_read" | "clipboard_write") {
+    if matches!(
+        tool,
+        "clipboard_read" | "clipboard_write" | "clipboard_clear"
+    ) {
         add("clipboard");
     }
 
@@ -871,6 +875,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
     let class = match tool {
         // Public driver/OS metadata with no user-content payload.
         "get_screen_size"
+        | "list_displays"
         | "get_cursor_position"
         | "get_config"
         | "get_session"
@@ -908,13 +913,14 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "launch_app"
         | "bring_to_front"
         | "set_window_frame"
+        | "set_window_state"
         | "start_session"
         | "end_session"
         | "set_agent_cursor_enabled"
         | "set_agent_cursor_motion"
         | "set_agent_cursor_theme" => RiskClass::R1,
 
-        "clipboard_write" => RiskClass::R1,
+        "clipboard_write" | "clipboard_clear" => RiskClass::R1,
 
         // Surfaces that can reveal or control sensitive local/authenticated
         // state. Active adapters still decide their exact resource scope at
@@ -947,6 +953,7 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         "get_desktop_state"
         | "get_window_state"
         | "kill_app"
+        | "close_app"
         | "stop_recording"
         | "replay_trajectory"
         | "install_ffmpeg"
@@ -1213,7 +1220,9 @@ fn enforce_hard_invariants(
             | "clear_value"
             | "scroll_to"
             | "kill_app"
+            | "close_app"
             | "bring_to_front"
+            | "set_window_state"
             | "get_accessibility_tree"
             | "get_window_state"
             | "verify_state"
@@ -1970,6 +1979,18 @@ mod tests {
         assert_eq!(
             ids("kill_app", serde_json::json!({})),
             vec!["process_control"]
+        );
+        assert_eq!(
+            ids("close_app", serde_json::json!({})),
+            vec!["process_control"]
+        );
+        assert_eq!(
+            ids("set_window_state", serde_json::json!({})),
+            vec!["desktop_input"]
+        );
+        assert_eq!(
+            ids("clipboard_clear", serde_json::json!({})),
+            vec!["clipboard"]
         );
         assert_eq!(
             ids("check_permissions", serde_json::json!({"prompt": false})),

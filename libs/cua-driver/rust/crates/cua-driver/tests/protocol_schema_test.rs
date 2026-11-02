@@ -247,6 +247,9 @@ fn assert_tools_list_schema_shape(mut d: RawDriver) {
         // foreground is requested.
         #[cfg(target_os = "macos")]
         "move_cursor",
+        // macOS full screen switches Spaces, so it needs foreground.
+        #[cfg(target_os = "macos")]
+        "set_window_state",
         // macOS set_value has no delivery ladder.
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         "set_value",

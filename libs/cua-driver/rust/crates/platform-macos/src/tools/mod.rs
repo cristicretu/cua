@@ -4,6 +4,7 @@ mod bring_to_front;
 mod capture_binding;
 mod click;
 mod clipboard;
+mod close_app;
 mod double_click;
 mod drag;
 mod get_window_state;
@@ -12,6 +13,7 @@ mod invoke_menu;
 mod kill_app;
 mod launch_app;
 mod list_apps;
+mod list_displays;
 mod list_surfaces;
 mod list_windows;
 mod menu_equivalent;
@@ -22,6 +24,7 @@ mod scroll_to;
 mod set_state;
 mod set_value;
 mod set_window_frame;
+mod set_window_state;
 mod type_text;
 // `screenshot` / `screenshot_compat` modules removed in PR #1692 —
 // `get_window_state` capture_mode:"vision" is the canonical screenshot
@@ -1460,12 +1463,14 @@ pub fn register_all(
     ));
     registry.register(Box::new(launch_app::LaunchAppTool));
     registry.register(Box::new(kill_app::KillAppTool));
+    registry.register(Box::new(close_app::CloseAppTool));
     let pid_window_candidates: WindowTargetCandidates = Arc::new(pid_window_target_candidates);
     registry.register(pid_window_guarded(
         bring_to_front::BringToFrontTool,
         &pid_window_candidates,
     ));
     registry.register(Box::new(set_window_frame::SetWindowFrameTool));
+    registry.register(Box::new(set_window_state::SetWindowStateTool));
     registry.register(Box::new(invoke_menu::InvokeMenuTool));
     registry.register(pid_window_guarded(
         click::ClickTool::new(state.clone()),
@@ -1529,6 +1534,7 @@ pub fn register_all(
     // triggers Claude Code's computer-use beta-tool injection (see cli.rs).
     let _ = compat;
     registry.register(Box::new(get_screen_size::GetScreenSizeTool));
+    registry.register(Box::new(list_displays::ListDisplaysTool));
     registry.register(Box::new(get_desktop_state::GetDesktopStateTool::new(
         state.clone(),
     )));

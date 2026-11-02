@@ -695,8 +695,9 @@ fn deprecated_name_note(old: &str, new: &str) -> String {
 ///   `accessibility.element_tokens` (Surface 6 — tool accepts the
 ///   opaque `element_token` arg), `accessibility.element_state` (tool
 ///   puts one element into a named state and reads it back)
-/// - `app.launch`, `app.list`, `app.kill`, `window.list`,
-///   `window.activate`, `window.frame.set`, `window.debug_info`
+/// - `app.launch`, `app.list`, `app.kill`, `app.close`, `window.list`,
+///   `window.activate`, `window.frame.set`, `window.state.set`,
+///   `window.debug_info`, `screen.displays.list`, `clipboard.clear`
 /// - `system.permissions.tcc`,
 ///   `system.permissions.tcc.accessibility`,
 ///   `system.permissions.tcc.screen_recording`
@@ -809,11 +810,15 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         "launch_app" => &["app.launch"],
         "list_apps" => &["app.list"],
         "kill_app" => &["app.kill"],
+        "close_app" => &["app.close"],
         "list_windows" => &["window.list"],
         "list_surfaces" => &["window.surfaces"],
         "bring_to_front" => &["window.activate"],
         "set_window_frame" => &["window.frame.set"],
+        "set_window_state" => &["window.state.set"],
         "debug_window_info" => &["window.debug_info"],
+        "list_displays" => &["screen.displays.list", "screen.dimensions"],
+        "clipboard_clear" => &["clipboard.clear"],
 
         // ── permissions / config ─────────────────────────────────────
         // The macOS TCC tokens are claimed even on Windows/Linux —
@@ -2819,6 +2824,12 @@ impl ToolRegistry {
                 },
                 "Allow Cua to read the current system clipboard",
             )
+        } else if tool_name == "clipboard_clear" {
+            (
+                "clear",
+                "none",
+                "Allow Cua to empty the current system clipboard",
+            )
         } else {
             let kind = if args.get("text").and_then(Value::as_str).is_some() {
                 "text"
@@ -3410,6 +3421,7 @@ fn is_physical_desktop_action(tool: &str) -> bool {
             | "scroll_to"
             | "bring_to_front"
             | "set_window_frame"
+            | "set_window_state"
     )
 }
 
@@ -6671,10 +6683,14 @@ mod capability_tests {
         "launch_app",
         "list_apps",
         "kill_app",
+        "close_app",
         "list_windows",
         "bring_to_front",
         "set_window_frame",
+        "set_window_state",
         "debug_window_info",
+        "list_displays",
+        "clipboard_clear",
         // permissions / config
         "check_permissions",
         "get_config",
@@ -6761,10 +6777,14 @@ mod capability_tests {
         "app.launch",
         "app.list",
         "app.kill",
+        "app.close",
         "window.list",
         "window.activate",
         "window.frame.set",
+        "window.state.set",
         "window.debug_info",
+        "screen.displays.list",
+        "clipboard.clear",
         // permissions
         "system.permissions.tcc",
         "system.permissions.tcc.accessibility",

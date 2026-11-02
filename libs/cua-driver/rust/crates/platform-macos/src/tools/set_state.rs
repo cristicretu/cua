@@ -67,6 +67,7 @@ fn def() -> &'static ToolDef {
                     "description": "Window ID. Omit with element_token."
                 },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "timeout_ms": cua_driver_core::tool_schema::actionability_timeout_schema(),
                 "state": {
                     "type": "string",
                     "enum": semantic_state::STATE_NAMES,
@@ -107,10 +108,13 @@ impl Tool for SetStateTool {
             },
             Err(error) => return error,
         };
-        let target = match acquire_semantic_target(&self.state, &args, "set_state").await {
-            Ok(target) => target,
-            Err(refusal) => return refusal,
-        };
+        let target =
+            match acquire_semantic_target(&self.state, &args, "set_state", requested.action_kind())
+                .await
+            {
+                Ok(target) => target,
+                Err(refusal) => return refusal,
+            };
         let SemanticTarget {
             pid,
             window_id,
@@ -468,33 +472,46 @@ pub(super) struct SemanticTarget {
     _lease: super::BackgroundMutationLease,
 }
 
-/// Resolve the token through the shared snapshot resolver (the same one every
-/// token tool uses, so its staleness and identity checks apply here), then
-/// take the per-pid mutation lease and re-prove the element still belongs to
-/// the exact window, as `set_value` does.
+/// Resolve the token through the shared resolver (staleness and identity
+/// checks), wait until the element is actionable for `kind` without holding
+/// a lease, then take the per-pid mutation lease, re-prove the element still
+/// belongs to the exact window and re-check it under the lease, as
+/// `set_value` does.
 pub(super) async fn acquire_semantic_target(
     state: &ToolState,
     args: &Value,
     tool: &str,
+    kind: cua_driver_core::actionability::ActionKind,
 ) -> Result<SemanticTarget, ToolResult> {
     let pid = super::target_pid(state, args)?;
-    let (element_index, window_id, element) = match super::resolve_element(state, pid, args).await?
-    {
-        cua_driver_core::element_token::ResolvedElement::None => {
-            return Err(ToolResult::error(format!(
-                "{tool} requires element_token to address the target element."
-            )))
-        }
-        cua_driver_core::element_token::ResolvedElement::Element {
-            window_id,
-            element_index,
-            element,
-        } => match u32::try_from(window_id) {
-            Ok(window_id) => (element_index, window_id, element),
-            Err(_) => return Err(ToolResult::error("window_id is out of range for macOS.")),
-        },
-    };
-    let lease = super::gate_background_window_action(
+    let (element_index, window_id, element, mut target) =
+        match super::resolve_target(state, pid, args).await? {
+            (cua_driver_core::element_token::ResolvedElement::None, _) | (_, None) => {
+                return Err(ToolResult::error(format!(
+                    "{tool} requires element_token to address the target element."
+                )))
+            }
+            (
+                cua_driver_core::element_token::ResolvedElement::Element {
+                    window_id,
+                    element_index,
+                    element,
+                },
+                Some(target),
+            ) => match u32::try_from(window_id) {
+                Ok(window_id) => (element_index, window_id, element, target),
+                Err(_) => return Err(ToolResult::error("window_id is out of range for macOS.")),
+            },
+        };
+    let timeout = cua_driver_core::actionability::timeout_from_args(args, kind, 0)?;
+    let mut waiter = target.waiter(
+        cua_driver_core::actionability::ActionRequest::semantic(kind),
+        timeout,
+    );
+    target.await_actionable(&mut waiter).await?;
+    let lease = super::gate_actionable_window_action(
+        &mut target,
+        &mut waiter,
         pid,
         window_id,
         Some(element.as_ptr()),

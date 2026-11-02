@@ -57,7 +57,8 @@ fn def() -> &'static ToolDef {
                     "type": "integer",
                     "description": "Window ID. Omit with element_token."
                 },
-                "element_token": cua_driver_core::tool_schema::element_token_schema()
+                "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "timeout_ms": cua_driver_core::tool_schema::actionability_timeout_schema()
             },
             "additionalProperties": false
         }),
@@ -80,7 +81,14 @@ impl Tool for ClearValueTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
-        let target = match acquire_semantic_target(&self.state, &args, "clear_value").await {
+        let target = match acquire_semantic_target(
+            &self.state,
+            &args,
+            "clear_value",
+            cua_driver_core::actionability::ActionKind::Clear,
+        )
+        .await
+        {
             Ok(target) => target,
             Err(refusal) => return refusal,
         };

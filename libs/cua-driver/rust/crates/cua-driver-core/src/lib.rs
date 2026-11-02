@@ -95,6 +95,7 @@ pub mod pip_hook;
 pub mod pointer_shape;
 pub mod policy;
 pub mod post_action_wait;
+pub mod protected_process;
 pub mod protocol;
 pub mod recording;
 pub mod recording_loader;
@@ -130,6 +131,7 @@ pub mod wait_tool;
 pub mod walk_budget;
 pub mod window_inspection;
 pub mod window_observation;
+pub mod window_state_change;
 pub mod window_state_view;
 pub mod window_target;
 

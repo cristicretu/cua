@@ -39,6 +39,18 @@ pub enum RequestedState {
     Focused,
 }
 
+impl RequestedState {
+    /// The actionability requirements this state change is gated on.
+    pub const fn action_kind(self) -> crate::actionability::ActionKind {
+        use crate::actionability::ActionKind;
+        match self {
+            Self::Checked | Self::Unchecked | Self::Toggled => ActionKind::Toggle,
+            Self::Expanded | Self::Collapsed => ActionKind::Expand,
+            Self::Focused => ActionKind::Focus,
+        }
+    }
+}
+
 /// Spellings `set_state` accepts, in schema order.
 pub const STATE_NAMES: &[&str] = &[
     "checked",

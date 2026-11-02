@@ -37,7 +37,8 @@ static DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
 fn def() -> &'static ToolDef {
     DEF.get_or_init(|| ToolDef {
         name: "get_desktop_state".into(),
-        description: "Capture the full display. The long edge is capped at \
+        description: "Capture the full display (the primary one unless `display_id` names \
+            another from list_displays). The long edge is capped at \
             `max_image_dimension` (the configured default unless given); pixels of the \
             returned image map back to the screen through its capture. Use its PNG as the coordinate source for actions \
             whose target is {kind:\"desktop\",display_id:\"primary\"}. Returns the true \
@@ -48,7 +49,8 @@ fn def() -> &'static ToolDef {
             "properties": {
                 "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
                 "screenshot_out_file": { "type": "string", "description": "Write PNG here instead of base64." },
-                "max_image_dimension": cua_driver_core::tool_schema::desktop_max_image_dimension_schema()
+                "max_image_dimension": cua_driver_core::tool_schema::desktop_max_image_dimension_schema(),
+                "display_id": { "type": "string", "description": "\"primary\" (default) or an id from list_displays. A non-primary capture is view-only: it has no capture_id, and desktop pixel actions still address the primary display." }
             },
             "additionalProperties": false
         }),
@@ -65,7 +67,21 @@ impl Tool for GetDesktopStateTool {
         def()
     }
 
-    async fn invoke(&self, args: Value) -> ToolResult {
+    async fn invoke(&self, mut args: Value) -> ToolResult {
+        // `display_id` is a macOS runtime extension, not part of the portable
+        // typed contract (whose SDK records are generated), so it is taken
+        // out before the typed parse.
+        let display_id = match args
+            .as_object_mut()
+            .and_then(|map| map.remove("display_id"))
+        {
+            None | Some(Value::Null) => None,
+            Some(Value::String(id)) => Some(id),
+            Some(Value::Number(id)) => Some(id.to_string()),
+            Some(_) => return ToolResult::error(
+                "get_desktop_state: `display_id` must be \"primary\" or an id from list_displays",
+            ),
+        };
         let capture_args = args.clone();
         let input = match parse_typed_input::<GetDesktopStateInput>("get_desktop_state", args) {
             Ok(input) => input,
@@ -92,6 +108,36 @@ impl Tool for GetDesktopStateTool {
                 s
             }
         });
+
+        if let Some(requested) = display_id {
+            let displays = match tokio::task::spawn_blocking(super::list_displays::active_displays)
+                .await
+            {
+                Ok(Ok(displays)) => displays,
+                Ok(Err(error)) => return ToolResult::error(format!("get_desktop_state: {error}")),
+                Err(error) => {
+                    return ToolResult::error(format!("get_desktop_state: worker failed: {error}"))
+                }
+            };
+            let display = match super::list_displays::select_display(&displays, &requested) {
+                Ok(display) => display.clone(),
+                Err(message) => {
+                    let message = format!("get_desktop_state: {message}");
+                    return ToolResult::error(message.clone()).with_structured(serde_json::json!({
+                        "status": "refused",
+                        "refusal": { "code": "display_not_found", "message": message },
+                    }));
+                }
+            };
+            if !display.primary {
+                return capture_secondary_display(
+                    display,
+                    max_image_dimension,
+                    screenshot_out_file,
+                )
+                .await;
+            }
+        }
 
         // True screen geometry (points + backing scale). Safe off the main thread.
         let (screen_width, screen_height, scale_factor) = match main_screen_size() {
@@ -201,6 +247,91 @@ impl Tool for GetDesktopStateTool {
     }
 }
 
+/// View-only capture of a non-primary display.
+///
+/// Desktop pixel actions accept only `display_id:"primary"`
+/// (`action_target.rs`), so this image publishes no capture binding: a
+/// capture_id from it would let an action map its pixels onto the primary
+/// display. The structured result carries the display's global bounds so the
+/// caller can relate the pixels to `list_windows` coordinates.
+async fn capture_secondary_display(
+    display: super::list_displays::DisplayInfo,
+    max_image_dimension: Option<u32>,
+    screenshot_out_file: Option<String>,
+) -> ToolResult {
+    let display_id = display.id;
+    let out_file = screenshot_out_file.clone();
+    let res = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let (png, overlay_capture) =
+            crate::capture::screenshot_display_by_id_excluding_overlay(display_id)?;
+        let full = crate::capture::png_dimensions(&png)?;
+        let png = match max_image_dimension {
+            Some(cap) if full.0.max(full.1) > cap => {
+                crate::capture::resize_png_if_needed(&png, cap)?
+            }
+            _ => png,
+        };
+        let (w, h) = crate::capture::png_dimensions(&png)?;
+        if let Some(ref path) = out_file {
+            std::fs::write(path, &png)?;
+        }
+        Ok((png, w, h, full, overlay_capture))
+    })
+    .await;
+    let (png, screenshot_width, screenshot_height, full_size, overlay_capture) = match res {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            return ToolResult::error(format!(
+                "Desktop screenshot of display {display_id} failed: {error}"
+            ))
+        }
+        Err(error) => return ToolResult::error(format!("Desktop screenshot task error: {error}")),
+    };
+
+    let mut content: Vec<Content> = Vec::new();
+    if screenshot_out_file.is_none() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        content.push(Content::image_png(BASE64.encode(&png)));
+    }
+    let bounds = display.bounds;
+    let mut summary = format!(
+        "display {display_id} screenshot {screenshot_width}x{screenshot_height} px \
+         (screen {}x{} pts at ({}, {}) @ {}x); view-only, no capture_id",
+        bounds.width, bounds.height, bounds.x, bounds.y, display.scale_factor
+    );
+    cursor_overlay::capture_exclusion::append_summary_note(&mut summary, &overlay_capture);
+    content.push(Content::text(summary));
+
+    let mut structured = serde_json::json!({
+        "platform": "macos",
+        "display": display_id.to_string(),
+        "screenshot_width": screenshot_width,
+        "screenshot_height": screenshot_height,
+        "screen_width": bounds.width as u64,
+        "screen_height": bounds.height as u64,
+        "scale_factor": display.scale_factor,
+        "screenshot_mime_type": "image/png",
+        "agent_overlay_capture": overlay_capture,
+        "display_bounds": {
+            "x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height,
+        },
+        "view_only": true,
+    });
+    if full_size != (screenshot_width, screenshot_height) {
+        structured["screenshot_original_width"] = serde_json::json!(full_size.0);
+        structured["screenshot_original_height"] = serde_json::json!(full_size.1);
+    }
+    if let Some(ref path) = screenshot_out_file {
+        structured["screenshot_file_path"] = serde_json::json!(path);
+    }
+    ToolResult {
+        content,
+        is_error: None,
+        structured_content: Some(structured),
+        action_record: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,10 +356,20 @@ mod tests {
         );
         assert!(props.contains_key("session"));
         assert!(props.contains_key("screenshot_out_file"));
+        assert_eq!(props["display_id"]["type"], "string");
         assert_eq!(
             d.input_schema["additionalProperties"],
             serde_json::json!(false)
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_display_id_is_rejected_before_capture() {
+        let tool = GetDesktopStateTool::new(Arc::new(ToolState::default()));
+        let result = tool
+            .invoke(serde_json::json!({"display_id": {"id": 1}}))
+            .await;
+        assert_eq!(result.is_error, Some(true));
     }
 
     #[test]

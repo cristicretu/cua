@@ -1021,7 +1021,12 @@ pub fn screenshot_display_bytes_excluding_overlay() -> anyhow::Result<(
         match run_native_capture_worker(
             display_capture_gate(),
             DISPLAY_CAPTURE_NATIVE_TIMEOUT,
-            move || screenshot_main_display_sck_excluding(overlay_window_id),
+            move || {
+                // SAFETY: CGMainDisplayID takes no arguments and only reads
+                // WindowServer state.
+                let main = unsafe { core_graphics::display::CGMainDisplayID() };
+                screenshot_display_sck(main, Some(overlay_window_id))
+            },
         ) {
             Ok(bytes) => Ok((bytes, ResidualCheck::Clean)),
             Err(error) => {
@@ -1044,38 +1049,39 @@ pub fn screenshot_display_bytes_excluding_overlay() -> anyhow::Result<(
     })
 }
 
-/// Main display at native pixel size through ScreenCaptureKit, with one
-/// window (the overlay) excluded. Requires macOS 14 for
+/// One display at native pixel size through ScreenCaptureKit, optionally
+/// with one window (the overlay) excluded. Requires macOS 14 for
 /// `SCScreenshotManager`.
-fn screenshot_main_display_sck_excluding(excluded_window_id: u32) -> anyhow::Result<Vec<u8>> {
-    use core_graphics::display::CGMainDisplayID;
+fn screenshot_display_sck(
+    display_id: u32,
+    excluded_window_id: Option<u32>,
+) -> anyhow::Result<Vec<u8>> {
     use screencapturekit::prelude::{SCContentFilter, SCShareableContent, SCStreamConfiguration};
     use screencapturekit::screenshot_manager::SCScreenshotManager;
 
     let content = SCShareableContent::get()
         .map_err(|e| anyhow::anyhow!("SCShareableContent::get failed: {e}"))?;
-    // SAFETY: CGMainDisplayID takes no arguments and only reads WindowServer state.
-    let main_display_id = unsafe { CGMainDisplayID() };
     let display = content
         .displays()
         .into_iter()
-        .find(|display| display.display_id() == main_display_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!("ScreenCaptureKit does not list the main display {main_display_id}")
-        })?;
+        .find(|display| display.display_id() == display_id)
+        .ok_or_else(|| anyhow::anyhow!("ScreenCaptureKit does not list display {display_id}"))?;
     let windows = content.windows();
-    let excluded = windows
-        .iter()
-        .find(|window| window.window_id() == excluded_window_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "ScreenCaptureKit does not list the overlay window {excluded_window_id}"
-            )
-        })?;
+    let excluded = match excluded_window_id {
+        Some(excluded_window_id) => vec![windows
+            .iter()
+            .find(|window| window.window_id() == excluded_window_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ScreenCaptureKit does not list the overlay window {excluded_window_id}"
+                )
+            })?],
+        None => Vec::new(),
+    };
 
     let mut filter = SCContentFilter::create()
         .with_display(&display)
-        .with_excluding_windows(&[excluded])
+        .with_excluding_windows(&excluded)
         .build();
     // `screencapture` includes the menu bar; keep the same image.
     filter.set_include_menu_bar(true);
@@ -1096,7 +1102,31 @@ fn screenshot_main_display_sck_excluding(excluded_window_id: u32) -> anyhow::Res
 
     let image = SCScreenshotManager::capture_image(&filter, &config)
         .map_err(|e| anyhow::anyhow!("SCScreenshotManager::capture_image failed: {e}"))?;
-    cgimage_to_png(&image, "main display")
+    cgimage_to_png(&image, "display")
+}
+
+/// Capture one non-main display for the agent with the Driver's overlay left
+/// out when it is showing. Unlike the main-display path there is no
+/// `screencapture` fallback: `screencapture -D` numbers displays by an index
+/// with no documented mapping to CoreGraphics ids, so a fallback could
+/// silently return the wrong display. A failed native capture fails closed.
+pub fn screenshot_display_by_id_excluding_overlay(
+    display_id: u32,
+) -> anyhow::Result<(
+    Vec<u8>,
+    cursor_overlay::capture_exclusion::AgentOverlayCapture,
+)> {
+    use cursor_overlay::capture_exclusion::{capture_excluding_overlays, ResidualCheck};
+    refuse_without_direct_capture_consent()?;
+    capture_excluding_overlays(&OverlayExcluder, |overlay| {
+        let excluded = overlay.copied();
+        run_native_capture_worker(
+            display_capture_gate(),
+            DISPLAY_CAPTURE_NATIVE_TIMEOUT,
+            move || screenshot_display_sck(display_id, excluded),
+        )
+        .map(|bytes| (bytes, ResidualCheck::Clean))
+    })
 }
 
 /// Skip an implicit capture that would make macOS show its one-time

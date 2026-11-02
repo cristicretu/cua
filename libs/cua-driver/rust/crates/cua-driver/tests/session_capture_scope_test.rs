@@ -129,7 +129,8 @@ fn policies_are_isolated_immutable_and_enforced_over_mcp() {
             "desktop_unlocked": true,
             "escalation_reason": "foreground_ineffective",
             "escalation_detail": "window ladder exhausted",
-            "code": "window_scope_disabled"
+            "code": "window_scope_disabled",
+            "disposition": {"delivery": "not_delivered", "retry": "safe"}
         })
     );
     assert_eq!(
