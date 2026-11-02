@@ -515,7 +515,10 @@ pub fn classify_cursor_semantics(name: &str, args: &Value) -> Option<CursorSeman
 
     let target = if name.starts_with("browser_") {
         Some(CursorTarget::Browser)
-    } else if matches!(name, "set_window_frame" | "set_window_state" | "invoke_menu") {
+    } else if matches!(
+        name,
+        "set_window_frame" | "set_window_state" | "invoke_menu"
+    ) {
         Some(CursorTarget::Desktop)
     } else if args
         .get("element_token")

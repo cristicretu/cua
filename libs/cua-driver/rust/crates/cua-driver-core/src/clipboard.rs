@@ -224,10 +224,10 @@ impl Tool for ClipboardClearTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
-        if let Some(unknown) = args
-            .as_object()
-            .and_then(|map| map.keys().find(|key| !key.starts_with('_') && *key != "session"))
-        {
+        if let Some(unknown) = args.as_object().and_then(|map| {
+            map.keys()
+                .find(|key| !key.starts_with('_') && *key != "session")
+        }) {
             return ToolResult::error(format!("clipboard_clear: unknown argument `{unknown}`"));
         }
         let backend = self.backend.clone();

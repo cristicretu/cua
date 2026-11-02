@@ -768,7 +768,10 @@ pub fn enforcement_adapters_for_call(
         add("desktop_input");
     }
 
-    if matches!(tool, "clipboard_read" | "clipboard_write" | "clipboard_clear") {
+    if matches!(
+        tool,
+        "clipboard_read" | "clipboard_write" | "clipboard_clear"
+    ) {
         add("clipboard");
     }
 

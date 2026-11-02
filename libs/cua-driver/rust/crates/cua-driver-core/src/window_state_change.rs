@@ -120,7 +120,10 @@ pub enum WindowStatePlan {
     AlreadyInState,
     Write(WindowWrite),
     /// Nothing is written. `code` is a stable refusal code.
-    Refuse { code: &'static str, message: String },
+    Refuse {
+        code: &'static str,
+        message: String,
+    },
 }
 
 fn refuse(code: &'static str, message: impl Into<String>) -> WindowStatePlan {
@@ -475,10 +478,7 @@ mod tests {
             code(plan(Maximize, &normal(), false, None)),
             "display_unknown"
         );
-        let bogus = Rect {
-            width: 0.0,
-            ..AREA
-        };
+        let bogus = Rect { width: 0.0, ..AREA };
         assert_eq!(
             code(plan(Maximize, &normal(), false, Some(bogus))),
             "display_unknown"
@@ -562,8 +562,7 @@ mod tests {
             },
         ];
         let pick = |frame| {
-            display_for_frame(&displays, frame, |d| d.bounds, |d| d.primary)
-                .map(|d| d.primary)
+            display_for_frame(&displays, frame, |d| d.bounds, |d| d.primary).map(|d| d.primary)
         };
         let mostly_right = Rect {
             x: 1400.0,

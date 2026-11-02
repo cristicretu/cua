@@ -123,15 +123,13 @@ fn result_for(pid: i32, outcome: CloseOutcome, elapsed: Duration, timeout_ms: u6
                  was sent; kill_app force-terminates."
             ),
         ),
-        CloseOutcome::Exited => ToolResult::text(format!(
-            "pid {pid} quit after {elapsed_ms} ms."
-        ))
-        .with_structured(serde_json::json!({
-            "pid": pid,
-            "requested": true,
-            "exited": true,
-            "elapsed_ms": elapsed_ms,
-        })),
+        CloseOutcome::Exited => ToolResult::text(format!("pid {pid} quit after {elapsed_ms} ms."))
+            .with_structured(serde_json::json!({
+                "pid": pid,
+                "requested": true,
+                "exited": true,
+                "elapsed_ms": elapsed_ms,
+            })),
         CloseOutcome::StillRunning => {
             let message = format!(
                 "close_app: the quit request was delivered to pid {pid}, but it was still running \
@@ -221,7 +219,8 @@ impl Tool for CloseAppTool {
         if !process_alive(pid) {
             return result_for(pid, CloseOutcome::NotRunning, Duration::ZERO, timeout_ms);
         }
-        if let Err(refusal) = super::kill_app::recheck_protected_fingerprint("close_app", &args).await
+        if let Err(refusal) =
+            super::kill_app::recheck_protected_fingerprint("close_app", &args).await
         {
             return refusal;
         }
@@ -271,7 +270,12 @@ mod tests {
         assert_eq!(structured(&exited)["exited"], true);
         assert_eq!(structured(&exited)["elapsed_ms"], 120);
 
-        let running = result_for(42, CloseOutcome::StillRunning, Duration::from_secs(5), 5_000);
+        let running = result_for(
+            42,
+            CloseOutcome::StillRunning,
+            Duration::from_secs(5),
+            5_000,
+        );
         assert_eq!(running.is_error, Some(true));
         assert_eq!(structured(&running)["exited"], false);
         assert_eq!(structured(&running)["requested"], true);

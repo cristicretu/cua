@@ -71,15 +71,16 @@ impl Tool for GetDesktopStateTool {
         // `display_id` is a macOS runtime extension, not part of the portable
         // typed contract (whose SDK records are generated), so it is taken
         // out before the typed parse.
-        let display_id = match args.as_object_mut().and_then(|map| map.remove("display_id")) {
+        let display_id = match args
+            .as_object_mut()
+            .and_then(|map| map.remove("display_id"))
+        {
             None | Some(Value::Null) => None,
             Some(Value::String(id)) => Some(id),
             Some(Value::Number(id)) => Some(id.to_string()),
-            Some(_) => {
-                return ToolResult::error(
-                    "get_desktop_state: `display_id` must be \"primary\" or an id from list_displays",
-                )
-            }
+            Some(_) => return ToolResult::error(
+                "get_desktop_state: `display_id` must be \"primary\" or an id from list_displays",
+            ),
         };
         let capture_args = args.clone();
         let input = match parse_typed_input::<GetDesktopStateInput>("get_desktop_state", args) {
@@ -109,10 +110,8 @@ impl Tool for GetDesktopStateTool {
         });
 
         if let Some(requested) = display_id {
-            let displays = match tokio::task::spawn_blocking(
-                super::list_displays::active_displays,
-            )
-            .await
+            let displays = match tokio::task::spawn_blocking(super::list_displays::active_displays)
+                .await
             {
                 Ok(Ok(displays)) => displays,
                 Ok(Err(error)) => return ToolResult::error(format!("get_desktop_state: {error}")),
@@ -267,7 +266,9 @@ async fn capture_secondary_display(
             crate::capture::screenshot_display_by_id_excluding_overlay(display_id)?;
         let full = crate::capture::png_dimensions(&png)?;
         let png = match max_image_dimension {
-            Some(cap) if full.0.max(full.1) > cap => crate::capture::resize_png_if_needed(&png, cap)?,
+            Some(cap) if full.0.max(full.1) > cap => {
+                crate::capture::resize_png_if_needed(&png, cap)?
+            }
             _ => png,
         };
         let (w, h) = crate::capture::png_dimensions(&png)?;

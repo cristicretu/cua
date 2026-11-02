@@ -2807,7 +2807,11 @@ impl ToolRegistry {
                 "Allow Cua to read the current system clipboard",
             )
         } else if tool_name == "clipboard_clear" {
-            ("clear", "none", "Allow Cua to empty the current system clipboard")
+            (
+                "clear",
+                "none",
+                "Allow Cua to empty the current system clipboard",
+            )
         } else {
             let kind = if args.get("text").and_then(Value::as_str).is_some() {
                 "text"

@@ -72,9 +72,11 @@ pub(crate) fn select_display<'a>(
             .find(|display| display.primary)
             .ok_or_else(|| "no primary display is active".to_owned());
     }
-    let id: u32 = requested
-        .parse()
-        .map_err(|_| format!("display_id {requested:?} is neither \"primary\" nor a display id from list_displays"))?;
+    let id: u32 = requested.parse().map_err(|_| {
+        format!(
+            "display_id {requested:?} is neither \"primary\" nor a display id from list_displays"
+        )
+    })?;
     displays
         .iter()
         .find(|display| display.id == id)
@@ -120,10 +122,15 @@ fn appkit_screens(main_height: f64) -> Vec<(u32, Rect, Rect)> {
         if screens.is_null() {
             return;
         }
-        let count: usize = msg_send![screens, count];
+        // CFArray accessors on the toll-free-bridged array: `-[NSArray count]`
+        // is backed by a Swift array on macOS 27 whose method encoding is
+        // signed, which objc2's message verification rejects for NSUInteger.
+        let array = screens as core_foundation::array::CFArrayRef;
+        let count = core_foundation::array::CFArrayGetCount(array);
         let key = NSString::from_str("NSScreenNumber");
         for index in 0..count {
-            let screen: *mut AnyObject = msg_send![screens, objectAtIndex: index];
+            let screen =
+                core_foundation::array::CFArrayGetValueAtIndex(array, index) as *mut AnyObject;
             if screen.is_null() {
                 continue;
             }
@@ -217,16 +224,18 @@ impl Tool for ListDisplaysTool {
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {
-        if let Some(unknown) = args
-            .as_object()
-            .and_then(|map| map.keys().find(|key| !key.starts_with('_') && *key != "session"))
-        {
+        if let Some(unknown) = args.as_object().and_then(|map| {
+            map.keys()
+                .find(|key| !key.starts_with('_') && *key != "session")
+        }) {
             return ToolResult::error(format!("list_displays: unknown argument `{unknown}`"));
         }
         let displays = match tokio::task::spawn_blocking(active_displays).await {
             Ok(Ok(displays)) => displays,
             Ok(Err(error)) => return ToolResult::error(format!("list_displays: {error}")),
-            Err(error) => return ToolResult::error(format!("list_displays: worker failed: {error}")),
+            Err(error) => {
+                return ToolResult::error(format!("list_displays: worker failed: {error}"))
+            }
         };
         let mut text = format!("{} display(s):", displays.len());
         for display in &displays {
@@ -335,6 +344,20 @@ mod tests {
         assert_eq!(json["bounds"]["width"], 1512.0);
         assert_eq!(json["visible_bounds"]["y"], 33.0);
         assert_eq!(json["scale_factor"], 2.0);
+    }
+
+    #[test]
+    #[ignore = "reads the host's live display configuration; run explicitly on a Mac"]
+    fn live_inventory_lists_exactly_one_primary_display_first() {
+        let displays = active_displays().expect("at least one display");
+        assert!(displays[0].primary);
+        // Maximize needs this: AppKit's frame must agree with CoreGraphics.
+        assert!(displays[0].visible_bounds.is_some(), "{displays:?}");
+        assert_eq!(displays.iter().filter(|display| display.primary).count(), 1);
+        for display in &displays {
+            assert!(display.bounds.is_valid());
+            assert!(display.scale_factor >= 1.0);
+        }
     }
 
     #[test]

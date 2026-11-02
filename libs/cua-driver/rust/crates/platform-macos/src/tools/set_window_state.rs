@@ -169,10 +169,11 @@ fn result_for(request: &Request, outcome: &Outcome) -> ToolResult {
             request.window_id
         ))
         .with_structured(structured),
-        Some(WindowStateVerdict::Verified) => {
-            ToolResult::text(format!("{action} applied and verified on window {}.", request.window_id))
-                .with_structured(structured)
-        }
+        Some(WindowStateVerdict::Verified) => ToolResult::text(format!(
+            "{action} applied and verified on window {}.",
+            request.window_id
+        ))
+        .with_structured(structured),
         Some(WindowStateVerdict::Unverifiable) => ToolResult::text(format!(
             "{action} was written to window {}, but its state could not be read back.",
             request.window_id
@@ -290,12 +291,14 @@ fn read_facts(window: &AxWindow, window_id: u32) -> WindowStateFacts {
             height: bounds.height,
         })
         // SAFETY: `window.target` is a live retained element.
-        .or_else(|| unsafe { element_screen_rect(window.target) }.map(|rect| Rect {
-            x: rect[0],
-            y: rect[1],
-            width: rect[2],
-            height: rect[3],
-        }))
+        .or_else(|| {
+            unsafe { element_screen_rect(window.target) }.map(|rect| Rect {
+                x: rect[0],
+                y: rect[1],
+                width: rect[2],
+                height: rect[3],
+            })
+        })
         .filter(|rect| rect.is_valid());
     // SAFETY: `window.target` is a live retained element for every read.
     unsafe {
@@ -314,8 +317,13 @@ fn read_facts(window: &AxWindow, window_id: u32) -> WindowStateFacts {
 /// The visible work area of the display the window is on.
 fn work_area_for(frame: Option<Rect>) -> Option<Rect> {
     let displays = super::list_displays::active_displays().ok()?;
-    display_for_frame(&displays, frame, |display| display.bounds, |display| display.primary)
-        .and_then(|display| display.visible_bounds)
+    display_for_frame(
+        &displays,
+        frame,
+        |display| display.bounds,
+        |display| display.primary,
+    )
+    .and_then(|display| display.visible_bounds)
 }
 
 /// Perform one write. Returns the AX errors it reported (empty on success).
@@ -330,12 +338,14 @@ fn apply(window: &AxWindow, write: WindowWrite, only: Option<&WindowStateFacts>)
     // SAFETY: `window.target` is a live retained element.
     unsafe {
         match write {
-            WindowWrite::SetMinimized(value) => {
-                check("AXMinimized", set_bool_attr(window.target, "AXMinimized", value))
-            }
-            WindowWrite::SetFullscreen(value) => {
-                check("AXFullScreen", set_bool_attr(window.target, "AXFullScreen", value))
-            }
+            WindowWrite::SetMinimized(value) => check(
+                "AXMinimized",
+                set_bool_attr(window.target, "AXMinimized", value),
+            ),
+            WindowWrite::SetFullscreen(value) => check(
+                "AXFullScreen",
+                set_bool_attr(window.target, "AXFullScreen", value),
+            ),
             WindowWrite::SetFrame(target) => {
                 // Position before size: on Tahoe, AXPosition written right
                 // after AXSize can roll the size back (see set_window_frame).
@@ -417,8 +427,7 @@ fn change_state(request: &Request) -> Result<Outcome, ToolResult> {
             write_errors.extend(apply(&window, write, Some(&after)));
         }
     }
-    let front_after =
-        crate::input::skylight::front_process_matches(request.pid, request.window_id);
+    let front_after = crate::input::skylight::front_process_matches(request.pid, request.window_id);
     let activated = match (front_before, front_after) {
         (Some(before), Some(after)) => Some(!before && after),
         _ => None,
@@ -488,9 +497,11 @@ mod tests {
         .unwrap();
         assert!(ok.foreground);
         assert_eq!(ok.action, WindowStateAction::Fullscreen);
-        assert!(!parse_request(&serde_json::json!({"pid": 42, "window_id": 7, "action": "minimize"}))
-            .unwrap()
-            .foreground);
+        assert!(
+            !parse_request(&serde_json::json!({"pid": 42, "window_id": 7, "action": "minimize"}))
+                .unwrap()
+                .foreground
+        );
         for bad in [
             serde_json::json!({"pid": 42, "window_id": 7, "action": "zoom"}),
             serde_json::json!({"pid": 0, "window_id": 7, "action": "minimize"}),
@@ -505,12 +516,7 @@ mod tests {
     fn background_fullscreen_is_refused_without_touching_the_window() {
         // The decision runs before any write; the pid/window here do not
         // exist, so reaching AX would have failed with window_not_found.
-        let decision = plan(
-            WindowStateAction::Fullscreen,
-            &facts(false),
-            false,
-            None,
-        );
+        let decision = plan(WindowStateAction::Fullscreen, &facts(false), false, None);
         assert!(matches!(
             decision,
             WindowStatePlan::Refuse {
@@ -550,19 +556,30 @@ mod tests {
         assert_eq!(structured["changed"], false);
 
         let write = Some(WindowWrite::SetMinimized(true));
-        let verified = result_for(&request, &outcome(write, Some(WindowStateVerdict::Verified)));
+        let verified = result_for(
+            &request,
+            &outcome(write, Some(WindowStateVerdict::Verified)),
+        );
         assert_eq!(verified.is_error, None);
-        assert_eq!(verified.structured_content.unwrap()["after"]["minimized"], true);
+        assert_eq!(
+            verified.structured_content.unwrap()["after"]["minimized"],
+            true
+        );
 
-        let unverifiable =
-            result_for(&request, &outcome(write, Some(WindowStateVerdict::Unverifiable)));
+        let unverifiable = result_for(
+            &request,
+            &outcome(write, Some(WindowStateVerdict::Unverifiable)),
+        );
         assert_eq!(unverifiable.is_error, None);
         assert_eq!(
             unverifiable.structured_content.unwrap()["verdict"],
             "unverifiable"
         );
 
-        let missed = result_for(&request, &outcome(write, Some(WindowStateVerdict::NotReached)));
+        let missed = result_for(
+            &request,
+            &outcome(write, Some(WindowStateVerdict::NotReached)),
+        );
         assert_eq!(missed.is_error, Some(true));
         let structured = missed.structured_content.unwrap();
         assert_eq!(structured["code"], "window_state_not_reached");

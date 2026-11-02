@@ -177,7 +177,13 @@ mod tests {
 
     #[test]
     fn session_critical_names_bundles_and_executables_are_protected() {
-        for name in ["Finder", "Dock", "WindowServer", "loginwindow", "SystemUIServer"] {
+        for name in [
+            "Finder",
+            "Dock",
+            "WindowServer",
+            "loginwindow",
+            "SystemUIServer",
+        ] {
             assert!(protected(&named(name)), "{name}");
         }
         assert!(protected(&named("finder")), "APFS-style case folding");
@@ -206,7 +212,11 @@ mod tests {
             "Fіnder",
             "Dоck",
         ] {
-            assert_eq!(classify(&named(name)), ProcessProtection::Allowed, "{name:?}");
+            assert_eq!(
+                classify(&named(name)),
+                ProcessProtection::Allowed,
+                "{name:?}"
+            );
         }
         for id in [
             "com.docker.docker",
@@ -217,7 +227,9 @@ mod tests {
             assert_eq!(classify(&bundle(id)), ProcessProtection::Allowed, "{id}");
         }
         assert_eq!(
-            classify(&executable("/Applications/Docker.app/Contents/MacOS/Docker")),
+            classify(&executable(
+                "/Applications/Docker.app/Contents/MacOS/Docker"
+            )),
             ProcessProtection::Allowed
         );
         // A directory that happens to be named like a protected process does

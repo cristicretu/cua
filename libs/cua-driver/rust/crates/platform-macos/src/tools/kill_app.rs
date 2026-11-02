@@ -133,7 +133,10 @@ pub(super) async fn process_control_scope(
 
 /// Refuse when the process the authorization layer approved is no longer the
 /// one at `pid` (it exited and the pid was reused).
-pub(super) async fn recheck_protected_fingerprint(tool: &str, args: &Value) -> Result<(), ToolResult> {
+pub(super) async fn recheck_protected_fingerprint(
+    tool: &str,
+    args: &Value,
+) -> Result<(), ToolResult> {
     let Some(expected) = args.get("_protected_process_fingerprint") else {
         return Ok(());
     };
