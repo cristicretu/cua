@@ -37,6 +37,13 @@ impl Tool for Probe {
         if let Some(message) = args["fail_message"].as_str() {
             return ToolResult::error(message.to_owned());
         }
+        if let Some(code) = args["fail_code"].as_str() {
+            return ToolResult::error(format!("{} refused: {code}", self.def.name))
+                .with_structured(json!({
+                    "code": code,
+                    "escalation": {"recommended": "foreground"},
+                }));
+        }
         if args["fail"] == true {
             ToolResult::error(format!("{} refused: probe asked to fail", self.def.name))
         } else {
@@ -75,6 +82,7 @@ impl Harness {
                             "text": {"type": "string"},
                             "fail": {"type": "boolean"},
                             "fail_message": {"type": "string"},
+                            "fail_code": {"type": "string"},
                             "element_token": {"type": "string"},
                             "value": {"type": "string"},
                             "key": {"type": "string"},
@@ -786,4 +794,66 @@ async fn non_scalar_set_value_is_rejected_before_any_batch_action() {
             .starts_with("set_value: invalid arguments at /value:"));
         assert_eq!(harness.hits("set_value"), 0);
     }
+}
+
+#[tokio::test]
+async fn every_step_and_the_batch_report_whether_input_landed() {
+    let harness = Harness::new();
+    let result = harness
+        .run(
+            json!({"pid": 1, "window_id": 2, "observe": false, "steps": [
+                {"tool": "click", "args": {"x": 1, "y": 2}},
+                {"tool": "click", "args": {"x": 1, "y": 2, "fail_code": "background_unavailable"}}
+            ]}),
+        )
+        .await;
+    assert_eq!(result.is_error, Some(true));
+    let structured = result.structured_content.unwrap();
+    let delivered_unverified = json!({"delivery": "delivered_unverified", "retry": "unsafe"});
+    assert_eq!(structured["steps"][0]["disposition"], delivered_unverified);
+    assert_eq!(
+        structured["steps"][1]["disposition"],
+        json!({"delivery": "not_delivered", "retry": "safe"})
+    );
+    // Step 1 landed, so resending the batch would click again.
+    assert_eq!(structured["disposition"], delivered_unverified);
+
+    // A batch that stopped before anything was sent is safe to resend.
+    let result = harness
+        .run(
+            json!({"pid": 1, "window_id": 2, "observe": false, "steps": [
+                {"tool": "click", "args": {"x": 1, "y": 2, "fail_code": "stale_element_token"}}
+            ]}),
+        )
+        .await;
+    let structured = result.structured_content.unwrap();
+    assert_eq!(
+        structured["disposition"],
+        json!({"delivery": "not_delivered", "retry": "safe"})
+    );
+}
+
+#[tokio::test]
+async fn no_fallback_runs_after_a_failure_that_may_have_landed() {
+    let harness = Harness::new();
+    // The app answered the write with an error: it may have acted, so the
+    // foreground fallback must not send it a second time.
+    let result = harness
+        .run(json!({"pid": 1, "window_id": 2, "observe": false, "foreground_fallback": true,
+            "steps": [{"tool": "click", "args": {"x": 1, "y": 2, "fail_code": "ax_action_failed"}}]}))
+        .await;
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(harness.hits("click"), 1);
+    let structured = result.structured_content.unwrap();
+    let uncertain = json!({"delivery": "delivery_uncertain", "retry": "unsafe"});
+    assert_eq!(structured["steps"][0]["disposition"], uncertain);
+    assert_eq!(structured["disposition"], uncertain);
+
+    // A refusal that sent nothing still falls back.
+    let _ = harness
+        .run(json!({"pid": 1, "window_id": 2, "observe": false, "foreground_fallback": true,
+            "steps": [{"tool": "click", "args": {"x": 1, "y": 2, "fail_code": "background_unavailable"}}]}))
+        .await;
+    assert_eq!(harness.hits("click"), 3);
+    assert_eq!(harness.last("click")["delivery_mode"], "foreground");
 }

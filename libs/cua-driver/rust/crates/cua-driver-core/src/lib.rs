@@ -73,6 +73,7 @@ pub mod cursor_shape;
 pub mod daemon;
 pub mod delivery;
 pub mod desktop_capture_scale;
+pub mod disposition;
 pub mod element_frame;
 pub mod element_query;
 pub mod element_token;
@@ -102,6 +103,7 @@ pub mod recording_tools;
 pub mod recording_zoom;
 pub mod recovery_hint;
 pub mod ref_identity;
+pub mod release_guard;
 #[cfg(feature = "script")]
 pub mod script_tool;
 pub mod semantic_state;

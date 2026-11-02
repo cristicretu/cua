@@ -171,7 +171,7 @@ impl Tool for RightClickTool {
 
             return match result {
                 Ok(Ok(msg)) => ToolResult::text(msg),
-                Ok(Err(e)) => ToolResult::error(format!("Right-click failed: {e}")),
+                Ok(Err(e)) => crate::input::ax_actions::ax_error_result("Right-click failed", &e),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
@@ -351,8 +351,21 @@ fn ax_show_menu(element_ptr: usize, idx: usize, pid: i32, wid: u32) -> anyhow::R
                 "Shown menu for [{idx}] {role} \"{title}\" (AXShowMenu)."
             ));
         }
-        // Advertised but the action failed — fall through to the pixel path
-        // rather than erroring out.
+        // Advertised but the action failed: fall through to the pixel path
+        // only when the answer proves the menu did not open. After
+        // kAXErrorFailure or kAXErrorCannotComplete it may be open already,
+        // and a second right-click would act on it again.
+        let mutation = crate::input::ax_actions::classify_ax_error(err);
+        if !mutation.allows_another_mechanism() {
+            let message = format!("AXShowMenu returned {err} for [{idx}] {role} \"{title}\"");
+            return Err(crate::input::ax_actions::AxMutationError::from_ax_error(
+                "AXShowMenu",
+                err,
+                message.clone(),
+            )
+            .map(anyhow::Error::from)
+            .unwrap_or_else(|| anyhow::anyhow!(message)));
+        }
         tracing::debug!("AXShowMenu returned {err} for [{idx}]; falling back to pixel right-click");
     }
 

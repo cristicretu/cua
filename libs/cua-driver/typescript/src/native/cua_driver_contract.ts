@@ -485,6 +485,151 @@ const FfiConverterTypeActionRoute = (() => {
     return new FFIConverter();
 })();
 
+/**
+ * How far a call's input got. The vocabulary follows agent-desktop's
+ * `docs/json-output.md` "Disposition values" (Apache-2.0).
+ */
+export enum DeliveryDisposition {
+    /**
+     * Nothing is known about delivery: an error with no evidence either way.
+     */
+    Unknown,
+    /**
+     * Nothing reached the app: a refusal, invalid arguments, a read.
+     */
+    NotDelivered,
+    /**
+     * Input was sent and the app answered with an error, or only part of it
+     * landed. It may have acted.
+     */
+    DeliveryUncertain,
+    /**
+     * Input was sent and nothing confirmed its effect.
+     */
+    DeliveredUnverified,
+    /**
+     * Input was sent and a readback confirmed its effect.
+     */
+    DeliveredVerified
+}
+
+const FfiConverterTypeDeliveryDisposition = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = DeliveryDisposition;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return DeliveryDisposition.Unknown;
+                case 2: return DeliveryDisposition.NotDelivered;
+                case 3: return DeliveryDisposition.DeliveryUncertain;
+                case 4: return DeliveryDisposition.DeliveredUnverified;
+                case 5: return DeliveryDisposition.DeliveredVerified;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case DeliveryDisposition.Unknown: return ordinalConverter.write(1, into);
+                case DeliveryDisposition.NotDelivered: return ordinalConverter.write(2, into);
+                case DeliveryDisposition.DeliveryUncertain: return ordinalConverter.write(3, into);
+                case DeliveryDisposition.DeliveredUnverified: return ordinalConverter.write(4, into);
+                case DeliveryDisposition.DeliveredVerified: return ordinalConverter.write(5, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+/**
+ * Whether the same call may be repeated without first reading the app.
+ */
+export enum RetryDisposition {
+    Unknown,
+    /**
+     * Nothing was delivered, so a retry cannot double-fire.
+     */
+    Safe,
+    /**
+     * Something may have landed: read the app before repeating anything.
+     */
+    Unsafe
+}
+
+const FfiConverterTypeRetryDisposition = (() => {
+    const ordinalConverter = FfiConverterInt32;
+    type TypeName = RetryDisposition;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            switch (ordinalConverter.read(from)) {
+                case 1: return RetryDisposition.Unknown;
+                case 2: return RetryDisposition.Safe;
+                case 3: return RetryDisposition.Unsafe;
+                default: throw new UniffiInternalError.UnexpectedEnumCase();
+            }
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            switch (value) {
+                case RetryDisposition.Unknown: return ordinalConverter.write(1, into);
+                case RetryDisposition.Safe: return ordinalConverter.write(2, into);
+                case RetryDisposition.Unsafe: return ordinalConverter.write(3, into);
+            }
+        }
+        allocationSize(value: TypeName): number {
+            return ordinalConverter.allocationSize(0);
+        }
+    }
+    return new FFIConverter();
+})();
+
+/**
+ * `{delivery, retry}` on a call's structured result.
+ */
+export type Disposition = {
+    delivery: DeliveryDisposition,
+    retry: RetryDisposition
+}
+
+/**
+ * Generated factory for {@link Disposition} record objects.
+ */
+export const Disposition = (() => {
+    const defaults = () => ({
+    });
+    const create = (() => {
+        return uniffiCreateRecord<Disposition, ReturnType<typeof defaults>>(defaults);
+    })();
+    return Object.freeze({
+        create,
+        new: create,
+        defaults: () => Object.freeze(defaults()) as Partial<Disposition>,
+    });
+})();
+
+const FfiConverterTypeDisposition = (() => {
+    type TypeName = Disposition;
+    class FFIConverter extends AbstractFfiConverterByteArray<TypeName> {
+        read(from: RustBuffer): TypeName {
+            return {
+                delivery: FfiConverterTypeDeliveryDisposition.read(from),
+                retry: FfiConverterTypeRetryDisposition.read(from)
+            };
+        }
+        write(value: TypeName, into: RustBuffer): void {
+            FfiConverterTypeDeliveryDisposition.write(value.delivery, into);
+            FfiConverterTypeRetryDisposition.write(value.retry, into);
+        }
+        allocationSize(value: TypeName): number {
+            return FfiConverterTypeDeliveryDisposition.allocationSize(value.delivery) +
+             FfiConverterTypeRetryDisposition.allocationSize(value.retry);
+
+        }
+    };
+    return new FFIConverter();
+})();
+
 export type ActionResult = {
     effect: ActionEffect,
     route: ActionRoute,
@@ -514,7 +659,12 @@ export type ActionResult = {
      * The call that moves the task forward, always safe to run as is (a read,
      * or a call that keeps the user's window where it is).
      */
-    nextCall?: ActionNextCall
+    nextCall?: ActionNextCall,
+    /**
+     * Whether input reached the app, and whether repeating the call is safe.
+     * Stamped by the dispatch seam on every mutating tool's result.
+     */
+    disposition?: Disposition
 }
 
 /**
@@ -546,7 +696,8 @@ const FfiConverterTypeActionResult = (() => {
                 summary: FfiConverterOptionalString.read(from),
                 error: FfiConverterOptionalTypeActionError.read(from),
                 hint: FfiConverterOptionalString.read(from),
-                nextCall: FfiConverterOptionalTypeActionNextCall.read(from)
+                nextCall: FfiConverterOptionalTypeActionNextCall.read(from),
+                disposition: FfiConverterOptionalTypeDisposition.read(from)
             };
         }
         write(value: TypeName, into: RustBuffer): void {
@@ -559,6 +710,7 @@ const FfiConverterTypeActionResult = (() => {
             FfiConverterOptionalTypeActionError.write(value.error, into);
             FfiConverterOptionalString.write(value.hint, into);
             FfiConverterOptionalTypeActionNextCall.write(value.nextCall, into);
+            FfiConverterOptionalTypeDisposition.write(value.disposition, into);
         }
         allocationSize(value: TypeName): number {
             return FfiConverterTypeActionEffect.allocationSize(value.effect) +
@@ -569,7 +721,8 @@ const FfiConverterTypeActionResult = (() => {
              FfiConverterOptionalString.allocationSize(value.summary) +
              FfiConverterOptionalTypeActionError.allocationSize(value.error) +
              FfiConverterOptionalString.allocationSize(value.hint) +
-             FfiConverterOptionalTypeActionNextCall.allocationSize(value.nextCall);
+             FfiConverterOptionalTypeActionNextCall.allocationSize(value.nextCall) +
+             FfiConverterOptionalTypeDisposition.allocationSize(value.disposition);
 
         }
     };
@@ -6644,6 +6797,9 @@ const FfiConverterOptionalTypeActionError = new FfiConverterOptional(FfiConverte
 // FfiConverter for ActionNextCall | undefined
 const FfiConverterOptionalTypeActionNextCall = new FfiConverterOptional(FfiConverterTypeActionNextCall);
 
+// FfiConverter for Disposition | undefined
+const FfiConverterOptionalTypeDisposition = new FfiConverterOptional(FfiConverterTypeDisposition);
+
 // FfiConverter for number | undefined
 const FfiConverterOptionalFloat64 = new FfiConverterOptional(FfiConverterFloat64);
 
@@ -6828,7 +6984,9 @@ export default Object.freeze({
     FfiConverterTypeCursorThemeOutput,
     FfiConverterTypeCursorThemeSelection,
     FfiConverterTypeCursorVisualOutput,
+    FfiConverterTypeDeliveryDisposition,
     FfiConverterTypeDesktopScope,
+    FfiConverterTypeDisposition,
     FfiConverterTypeDragInput,
     FfiConverterTypeEffectiveScope,
     FfiConverterTypeElementFrame,
@@ -6862,6 +7020,7 @@ export default Object.freeze({
     FfiConverterTypePlatform,
     FfiConverterTypePredicateOutcome,
     FfiConverterTypePressKeyInput,
+    FfiConverterTypeRetryDisposition,
     FfiConverterTypeScrollBy,
     FfiConverterTypeScrollDirection,
     FfiConverterTypeScrollInput,

@@ -9,6 +9,7 @@ use core_graphics::{
     event::{CGEvent, CGEventFlags},
     event_source::{CGEventSource, CGEventSourceStateID},
 };
+use cua_driver_core::release_guard::ReleaseGuard;
 use foreign_types::ForeignType;
 
 const SCREEN_SHARING_BUNDLE_ID: &str = "com.apple.ScreenSharing";
@@ -70,19 +71,21 @@ pub fn press_key(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result<()> 
     if key == "+" || key.to_lowercase() == "plus" {
         let flags = modifier_flags(&["shift"]);
         let eq_code = key_name_to_code("=")?;
-        post_key(pid, eq_code, true, modifier_flags(modifiers) | flags)?;
+        let flags = modifier_flags(modifiers) | flags;
+        post_key(pid, eq_code, true, flags)?;
+        let held = ReleaseGuard::new(|| post_key(pid, eq_code, false, flags));
         key_gap_sleep();
-        post_key(pid, eq_code, false, modifier_flags(modifiers) | flags)?;
-        return Ok(());
+        return held.release();
     }
 
     let key_code = key_name_to_code(key)?;
     let flags = modifier_flags(modifiers);
 
     post_key(pid, key_code, true, flags)?;
+    // The key is down in the target: release it on every exit.
+    let held = ReleaseGuard::new(|| post_key(pid, key_code, false, flags));
     key_gap_sleep();
-    post_key(pid, key_code, false, flags)?;
-    Ok(())
+    held.release()
 }
 
 /// The virtual key a control character in typed text stands for.
@@ -180,9 +183,9 @@ pub fn hotkey_no_auth(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result
     let key_code = key_name_to_code(key)?;
     let flags = modifier_flags(modifiers);
     post_key_no_auth(pid, key_code, true, flags)?;
+    let held = ReleaseGuard::new(|| post_key_no_auth(pid, key_code, false, flags));
     key_gap_sleep();
-    post_key_no_auth(pid, key_code, false, flags)?;
-    Ok(())
+    held.release()
 }
 
 /// Press and release a single key to `pid` WITHOUT the auth-message envelope.
@@ -191,9 +194,9 @@ pub fn press_key_no_auth(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Res
     let key_code = key_name_to_code(key)?;
     let flags = modifier_flags(modifiers);
     post_key_no_auth(pid, key_code, true, flags)?;
+    let held = ReleaseGuard::new(|| post_key_no_auth(pid, key_code, false, flags));
     key_gap_sleep();
-    post_key_no_auth(pid, key_code, false, flags)?;
-    Ok(())
+    held.release()
 }
 
 /// Press and release one key on the global HID queue.
@@ -245,6 +248,16 @@ pub fn press_key_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
         key_gap_sleep();
     }
 
+    // The user's real modifiers are down: release them on every exit,
+    // a panic included, after the base key's own release.
+    let modifiers_held = ReleaseGuard::new(|| {
+        release_global_modifiers(
+            &source,
+            &pressed_modifiers,
+            active_flags,
+            CGEventTapLocation::HID,
+        )
+    });
     let result = (|| {
         post_global_key(
             &source,
@@ -253,22 +266,19 @@ pub fn press_key_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
             active_flags,
             CGEventTapLocation::HID,
         )?;
+        let key_held = ReleaseGuard::new(|| {
+            post_global_key(
+                &source,
+                key_code,
+                false,
+                active_flags,
+                CGEventTapLocation::HID,
+            )
+        });
         key_gap_sleep();
-        post_global_key(
-            &source,
-            key_code,
-            false,
-            active_flags,
-            CGEventTapLocation::HID,
-        )
+        key_held.release()
     })();
-
-    release_global_modifiers(
-        &source,
-        &pressed_modifiers,
-        active_flags,
-        CGEventTapLocation::HID,
-    );
+    modifiers_held.release();
     result
 }
 
@@ -314,8 +324,12 @@ pub(super) fn with_global_modifier_keys<T>(
         key_gap_sleep();
     }
 
+    // Released on every exit, a panicking gesture included.
+    let held = ReleaseGuard::new(|| {
+        release_global_modifiers(&source, &pressed, active_flags, CGEventTapLocation::HID)
+    });
     let result = gesture(active_flags);
-    release_global_modifiers(&source, &pressed, active_flags, CGEventTapLocation::HID);
+    held.release();
     result
 }
 
@@ -396,8 +410,10 @@ pub(super) fn with_pid_modifier_keys<T>(
         key_gap_sleep();
     }
 
+    // Released on every exit, a panicking gesture included.
+    let held = ReleaseGuard::new(|| release_pid_modifiers(pid, &pressed, active_flags));
     let result = gesture();
-    release_pid_modifiers(pid, &pressed, active_flags);
+    held.release();
     result
 }
 

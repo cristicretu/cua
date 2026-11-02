@@ -1702,7 +1702,8 @@ impl ToolRegistry {
 
     /// The canonical native dispatch boundary. Every refusal and every
     /// unconfirmed action leaves it with a `hint` (and a `next_call` when one
-    /// exists); see [`crate::recovery_hint`].
+    /// exists); see [`crate::recovery_hint`]. Every mutating tool's result and
+    /// every error leaves it with a `disposition`; see [`crate::disposition`].
     async fn invoke_authorized(
         &self,
         name: &str,
@@ -1736,6 +1737,11 @@ impl ToolRegistry {
             Err((message, structured)) => ToolResult::error(message).with_structured(structured),
         };
         crate::recovery_hint::annotate(tool, &seed, &mut result);
+        // After the hint, which gives a plain argument error its code. An
+        // unknown tool has no definition and reached nothing.
+        if let Some(read_only) = self.tools.get(tool).map(|tool| tool.def().read_only) {
+            crate::disposition::stamp(read_only, &mut result);
+        }
         crate::batch_nudge::annotate(tool, session.as_deref(), in_batch, &mut result);
         result
     }
@@ -5229,6 +5235,8 @@ resources:
                         "recommended": "foreground",
                         "reason": cua_driver_contract::ClickInput::DESKTOP_BACKGROUND_MESSAGE,
                     },
+                    // Refused before anything was sent (see `disposition`).
+                    "disposition": {"delivery": "not_delivered", "retry": "safe"},
                 })
             );
             assert_eq!(
@@ -6020,6 +6028,7 @@ resources:
             object.keys().map(String::as_str).collect::<Vec<_>>(),
             [
                 "delivery",
+                "disposition",
                 "effect",
                 "hint",
                 "next_call",
@@ -6028,6 +6037,10 @@ resources:
             ]
         );
         assert_eq!(structured["effect"], "unverifiable");
+        assert_eq!(
+            structured["disposition"],
+            serde_json::json!({"delivery": "delivered_unverified", "retry": "unsafe"})
+        );
         // An unconfirmed click says what to read next, built from the request.
         assert_eq!(
             structured["next_call"],

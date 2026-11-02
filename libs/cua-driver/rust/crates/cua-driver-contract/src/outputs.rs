@@ -707,6 +707,74 @@ pub struct ActionResult {
     /// or a call that keeps the user's window where it is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_call: Option<ActionNextCall>,
+    /// Whether input reached the app, and whether repeating the call is safe.
+    /// Stamped by the dispatch seam on every mutating tool's result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<Disposition>,
+}
+
+/// How far a call's input got. The vocabulary follows agent-desktop's
+/// `docs/json-output.md` "Disposition values" (Apache-2.0).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryDisposition {
+    /// Nothing is known about delivery: an error with no evidence either way.
+    Unknown,
+    /// Nothing reached the app: a refusal, invalid arguments, a read.
+    NotDelivered,
+    /// Input was sent and the app answered with an error, or only part of it
+    /// landed. It may have acted.
+    DeliveryUncertain,
+    /// Input was sent and nothing confirmed its effect.
+    DeliveredUnverified,
+    /// Input was sent and a readback confirmed its effect.
+    DeliveredVerified,
+}
+
+/// Whether the same call may be repeated without first reading the app.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryDisposition {
+    Unknown,
+    /// Nothing was delivered, so a retry cannot double-fire.
+    Safe,
+    /// Something may have landed: read the app before repeating anything.
+    Unsafe,
+}
+
+/// `{delivery, retry}` on a call's structured result.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Record)]
+#[serde(deny_unknown_fields)]
+pub struct Disposition {
+    pub delivery: DeliveryDisposition,
+    pub retry: RetryDisposition,
+}
+
+impl Disposition {
+    /// The disposition for `delivery`, with `retry` following from it: only
+    /// `not_delivered` is safe, and `unknown` stays unknown.
+    pub fn of(delivery: DeliveryDisposition) -> Self {
+        let retry = match delivery {
+            DeliveryDisposition::Unknown => RetryDisposition::Unknown,
+            DeliveryDisposition::NotDelivered => RetryDisposition::Safe,
+            DeliveryDisposition::DeliveryUncertain
+            | DeliveryDisposition::DeliveredUnverified
+            | DeliveryDisposition::DeliveredVerified => RetryDisposition::Unsafe,
+        };
+        Self { delivery, retry }
+    }
+
+    pub fn not_delivered() -> Self {
+        Self::of(DeliveryDisposition::NotDelivered)
+    }
+
+    pub fn uncertain() -> Self {
+        Self::of(DeliveryDisposition::DeliveryUncertain)
+    }
+
+    pub fn is_retry_safe(&self) -> bool {
+        self.retry == RetryDisposition::Safe
+    }
 }
 
 /// A call an agent can make next: `{tool, arguments}`.
@@ -903,6 +971,7 @@ mod tests {
             error: None,
             hint: None,
             next_call: None,
+            disposition: None,
         }
     }
 
@@ -959,6 +1028,7 @@ mod tests {
             properties.keys().map(String::as_str).collect::<Vec<_>>(),
             [
                 "delivery",
+                "disposition",
                 "effect",
                 "error",
                 "escalation",
