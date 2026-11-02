@@ -1862,6 +1862,7 @@ impl Tool for GetWindowStateTool {
                             window_id: xid,
                             key: cua_driver_core::window_state_view::ViewKey {
                                 query: query.clone(),
+                                surface: None,
                                 max_elements: max_elements.unwrap_or(LINUX_DEFAULT_MAX_ELEMENTS),
                                 max_depth,
                                 scope: None,

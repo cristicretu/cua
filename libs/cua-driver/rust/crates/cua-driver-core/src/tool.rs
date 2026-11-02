@@ -810,6 +810,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         "list_apps" => &["app.list"],
         "kill_app" => &["app.kill"],
         "list_windows" => &["window.list"],
+        "list_surfaces" => &["window.surfaces"],
         "bring_to_front" => &["window.activate"],
         "set_window_frame" => &["window.frame.set"],
         "debug_window_info" => &["window.debug_info"],
@@ -840,6 +841,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
         "get_recording_state" => &["recording.state"],
         "replay_trajectory" => &["recording.replay"],
         "run_steps" => &["input.batch"],
+        "wait" => &["accessibility.wait"],
         "run_script" => &["input.script"],
         "install_ffmpeg" => &["recording.install_dependency"],
         "install_extension" => &["extension.install"],
@@ -1396,6 +1398,9 @@ impl ToolRegistry {
     /// registry handle, as for `replay_trajectory`.
     fn register_batch_tools(&mut self) {
         self.register(Box::new(crate::batch_tools::RunStepsTool::new(
+            self.replay_registry.clone(),
+        )));
+        self.register(Box::new(crate::wait_tool::WaitTool::new(
             self.replay_registry.clone(),
         )));
         // On by default; the operator can turn it off (see script_tool).

@@ -23,6 +23,7 @@ pub mod launch;
 pub mod ref_verify;
 pub mod reveal_scroll;
 pub mod snapshot;
+pub mod surfaces;
 pub mod tree;
 pub mod window_scope;
 

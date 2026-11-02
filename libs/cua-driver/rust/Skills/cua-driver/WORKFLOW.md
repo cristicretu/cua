@@ -100,6 +100,19 @@ cua-driver run_steps '{"session":"run-1","steps":[
 - `observe` is optional and reads once, after the last executed step (also after a failure). Pass `true` or `get_window_state` arguments; `pid`/`window_id` come from the last step that names both. Defaults: `since:"latest"` (only what changed since your last read of that window with the same view; a full read if there is none), `include_screenshot:false`, `max_elements:250`. Pass `include_screenshot:true` to see the window, or `since:null` for a full read. Omit `observe` to read nothing.
 - Read `steps[].ok` and `failed_step`. Steps before a failure did run and are not rolled back; steps after it did not. Observe before repairing, as for a single `unverifiable` action. When a step fails because another window of the app holds focus (a dialog opened mid-batch), the end read is of that window, even without `observe`; when a pixel step names a window with no screenshot yet, the end read includes its screenshot. A step refused because its app ignores background input (Electron, LibreOffice) says how to re-send it; set `foreground_fallback:true` on `run_steps` to retry such steps once in the foreground (the window is activated and the pointer may move).
 
+## Wait for a state
+
+Use `wait` instead of sleeping and re-reading. It polls every 250 ms until one condition holds, for up to `timeout_ms` (default 5000, capped at 60000), and never acts or takes focus. Give one of:
+
+- an element: `role`/`name`/`text` in a window named by `pid`+`window_id` or `app`/`window`, with optional `gone:true`, `value`, `value_contains`, `enabled`, `selected`, or `count` (exactly N matches);
+- a window: `app` and/or `window` (title substring), no `window_id` needed; `gone:true` waits for it to close;
+- a surface: `surface` (`menu`, `sheet`, `popover`, `alert`) of `app` or `pid`; `gone:true` waits for it to close;
+- `ms`: a fixed pause.
+
+A miss ends with `code:"timeout"` and `last_code`/`detail` saying what was last seen; a refused or ambiguous read stops at once with its own code. An element wait reads the window, which replaces its snapshot: act on the returned `element.element_token`, or by name in `run_steps`. In a batch, `{"wait": {...}}` is a step with the same arguments, and it inherits the batch window.
+
+`list_surfaces({pid})` lists what an app has open (menu-bar or context menu, per-window sheet/popover/alert, and the focused element). `get_window_state` with `surface` reads only that surface. When none is open it refuses with `surface_not_found` and lists what is open.
+
 ## Script a flow
 
 Use `run_script` when the flow needs logic between actions: a loop over rows, a branch on what the app shows, a retry, or a value read in one window and typed into another. The script is JavaScript, the body of an async function; it runs in ONE call and only its `return` value, console output and a per-call log come back. Use `run_steps` for a fixed list of steps you have already decided, and plain calls when the next step needs your judgement.

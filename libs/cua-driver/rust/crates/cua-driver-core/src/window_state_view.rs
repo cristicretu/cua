@@ -251,6 +251,8 @@ enum SinceOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewKey {
     pub query: Option<String>,
+    /// The open surface a read was rooted at (`surface`), if any.
+    pub surface: Option<String>,
     pub max_elements: usize,
     pub max_depth: Option<usize>,
     /// Backend-specific shape of the walk beyond the shared caps, e.g. a
@@ -770,6 +772,7 @@ pub(crate) fn remember_for_test(snapshot_id: &str, pid: i64, window_id: u64, mar
         window_id,
         key: ViewKey {
             query: None,
+            surface: None,
             max_elements: DEFAULT_MAX_ELEMENTS,
             max_depth: None,
             scope: None,
@@ -1273,6 +1276,7 @@ mod tests {
             window_id,
             key: ViewKey {
                 query: None,
+                surface: None,
                 max_elements: 250,
                 max_depth: None,
                 scope: None,

@@ -478,7 +478,7 @@ pub(super) async fn acquire_semantic_target(
     tool: &str,
 ) -> Result<SemanticTarget, ToolResult> {
     let pid = super::target_pid(state, args)?;
-    let (element_index, window_id, element) = match state.snapshots.resolve(pid, args)? {
+    let (element_index, window_id, element) = match super::resolve_element(state, pid, args).await? {
         cua_driver_core::element_token::ResolvedElement::None => {
             return Err(ToolResult::error(format!(
                 "{tool} requires element_token to address the target element."
