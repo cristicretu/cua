@@ -311,6 +311,28 @@ fn walk_tree_with_web_content(
             break (top_level, walk);
         };
 
+        // A `surface` read walks only that surface of the resolved window.
+        // An unresolved window walks nothing either way.
+        let mut surface_root = None;
+        let walk_these = match (SURFACE_REQUEST.with(|r| r.borrow().clone()), window_id) {
+            (Some(wanted), Some(wid)) => {
+                let outcome = if window_scope.as_ref().is_some_and(WindowScope::is_matched) {
+                    match super::surfaces::find_root(app_elem, wid, &wanted) {
+                        Ok((root, surface)) => {
+                            surface_root = Some(root);
+                            SurfaceOutcome::Found(surface)
+                        }
+                        Err(open) => SurfaceOutcome::Missing(open),
+                    }
+                } else {
+                    SurfaceOutcome::Missing(Vec::new())
+                };
+                SURFACE_OUTCOME.with(|o| *o.borrow_mut() = Some(outcome));
+                surface_root.into_iter().collect()
+            }
+            _ => walk_these,
+        };
+
         // Walk each top-level child at depth 0.
         for child in walk_these {
             walk_element(
@@ -329,6 +351,9 @@ fn walk_tree_with_web_content(
 
         // Release all top-level elements (copy_children / copy_ax_windows both retain).
         release_all(top_level);
+        if let Some(root) = surface_root {
+            CFRelease(root as CFTypeRef);
+        }
 
         CFRelease(app_elem as CFTypeRef);
     }
@@ -774,6 +799,32 @@ fn format_node_line(node: &AXNode) -> String {
 
 thread_local! {
     static MENUS_COLLAPSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SURFACE_REQUEST: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static SURFACE_OUTCOME: std::cell::RefCell<Option<SurfaceOutcome>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What a `surface` walk rooted at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SurfaceOutcome {
+    Found(super::surfaces::Surface),
+    /// No such surface is open; the surfaces that are.
+    Missing(Vec<super::surfaces::Surface>),
+}
+
+/// Run a window-scoped `walk` rooted at the window's open `surface` (see
+/// [`super::surfaces::SURFACE_ARGS`]) on this thread, and say what it found.
+/// `None` walks as usual and reports nothing. A missing surface walks
+/// nothing, so no other part of the window passes for it.
+pub fn with_surface_root<T>(
+    surface: Option<&str>,
+    walk: impl FnOnce() -> T,
+) -> (T, Option<SurfaceOutcome>) {
+    let previous = SURFACE_REQUEST.with(|r| r.replace(surface.map(str::to_owned)));
+    SURFACE_OUTCOME.with(|o| o.borrow_mut().take());
+    let result = walk();
+    SURFACE_REQUEST.with(|r| r.replace(previous));
+    let outcome = SURFACE_OUTCOME.with(|o| o.borrow_mut().take());
+    (result, surface.and(outcome))
 }
 
 /// Shown on the menu bar row of a read whose menus were not walked.

@@ -1842,6 +1842,7 @@ impl Tool for GetWindowStateTool {
                             window_id: hwnd,
                             key: cua_driver_core::window_state_view::ViewKey {
                                 query: query.clone(),
+                                surface: None,
                                 max_elements,
                                 max_depth: args
                                     .get("max_depth")

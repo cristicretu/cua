@@ -44,6 +44,11 @@ fn def() -> &'static ToolDef {
                 "pid": { "type": "integer", "description": "Target process ID." },
                 "window_id": { "type": "integer", "description": "Target window ID from list_windows." },
                 "query": { "type": "string", "description": "Case-insensitive substring filter: returns matching rows plus ancestors; element_index values are not renumbered. Try this before a full read." },
+                "surface": {
+                    "type": "string",
+                    "enum": crate::ax::surfaces::SURFACE_ARGS,
+                    "description": "Read only one open surface instead of the whole window: `menu` (the open menu-bar or context menu), or this window's `sheet`, `popover`, `alert`, or `focused` element subtree. `surface_not_found` (listing what is open) when there is none; list_surfaces shows them."
+                },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
                 "include_accessibility_tree": {
                     "type": "boolean",
@@ -236,6 +241,23 @@ impl Tool for GetWindowStateTool {
             Err(refusal) => return refusal,
         };
         let query = args.opt_str("query");
+        let surface = match args.opt_str("surface") {
+            Some(kind) if crate::ax::surfaces::SURFACE_ARGS.contains(&kind.as_str()) => Some(kind),
+            Some(kind) => {
+                let detail = format!(
+                    "surface must be one of {}, got \"{kind}\"",
+                    crate::ax::surfaces::SURFACE_ARGS.join(", ")
+                );
+                return ToolResult::error(format!("get_window_state: {detail}")).with_structured(
+                    serde_json::json!({
+                        "code": "invalid_arguments",
+                        "tool": "get_window_state",
+                        "detail": detail,
+                    }),
+                );
+            }
+            None => None,
+        };
         let screenshot_out_file = args.opt_str("screenshot_out_file").map(|s| {
             // Expand ~ prefix.
             if let Some(relative) = s.strip_prefix("~/") {
@@ -350,31 +372,40 @@ impl Tool for GetWindowStateTool {
         let prefetched_capture = prefetch_capture(should_capture, want_tree, move || {
             crate::capture::screenshot_window_image(window_id)
         });
-        let (tree_result, prepared_snapshot) = if want_tree {
+        let (tree_result, prepared_snapshot, surface_outcome) = if want_tree {
             let q = query.clone();
+            let wanted_surface = surface.clone();
             // `timeout_ms` bounds the walk itself: it returns the partial tree
             // when the budget runs out. The outer deadline is only a backstop
             // for an AX call that ignores the per-element messaging timeout
             // (dropping a spawn_blocking JoinHandle cannot cancel it).
             let walk_future = tokio::task::spawn_blocking(move || {
-                let tree = crate::ax::tree::with_menus_collapsed(collapse_menus, || {
-                    crate::ax::tree::walk_tree_budgeted(
-                        pid,
-                        Some(window_id),
-                        q.as_deref(),
-                        max_depth,
-                        cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements),
-                    )
-                });
+                let (tree, surface_outcome) =
+                    crate::ax::tree::with_surface_root(wanted_surface.as_deref(), || {
+                        crate::ax::tree::with_menus_collapsed(collapse_menus, || {
+                            crate::ax::tree::walk_tree_budgeted(
+                                pid,
+                                Some(window_id),
+                                q.as_deref(),
+                                max_depth,
+                                cua_driver_core::walk_budget::WalkBudget::new(
+                                    timeout_ms,
+                                    max_elements,
+                                ),
+                            )
+                        })
+                    });
                 let payload = crate::ax::snapshot::AxSnapshot::from_nodes(&tree.nodes);
-                (tree, payload)
+                (tree, payload, surface_outcome)
             });
             // A launching app is waited on for up to `timeout_ms` before the
             // walk's own `timeout_ms` starts (see `ax::launch`).
             let backstop =
                 std::time::Duration::from_millis(timeout_ms) * 2 + AX_WALK_BACKSTOP_GRACE;
             match tokio::time::timeout(backstop, walk_future).await {
-                Ok(Ok((tree, payload))) => (Some(tree), Some(payload)),
+                Ok(Ok((tree, payload, surface_outcome))) => {
+                    (Some(tree), Some(payload), surface_outcome)
+                }
                 Ok(Err(e)) => return ToolResult::error(format!("AX tree walk failed: {e}")),
                 Err(_elapsed) => {
                     return ToolResult::error(format!(
@@ -387,7 +418,7 @@ impl Tool for GetWindowStateTool {
                 }
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // The window can close, or its CGWindow can be re-parented onto another
@@ -402,6 +433,19 @@ impl Tool for GetWindowStateTool {
         // `window_scope` is None only when no window_id was requested, which
         // this tool never does — so treat that as resolved.
         let scope_matched = window_scope.as_ref().is_none_or(|s| s.is_matched());
+        // A `surface` read of a window that has no such surface open is
+        // refused before anything is published: its empty walk must not
+        // replace the window's snapshot or pass for the surface.
+        let surface_found = match (&surface, surface_outcome) {
+            (Some(wanted), outcome) if want_tree && scope_matched => match outcome {
+                Some(crate::ax::tree::SurfaceOutcome::Found(found)) => Some(found),
+                Some(crate::ax::tree::SurfaceOutcome::Missing(open)) => {
+                    return surface_not_found(pid, window_id, wanted, &open)
+                }
+                None => return surface_not_found(pid, window_id, wanted, &[]),
+            },
+            _ => None,
+        };
 
         let removed = (!scope_matched && !observation_only)
             .then(|| self.state.snapshots.remove(pid, u64::from(window_id)))
@@ -693,6 +737,9 @@ impl Tool for GetWindowStateTool {
         if query.is_some() {
             structured["filtered_element_count"] = serde_json::json!(filtered_element_count);
         }
+        if let Some(found) = &surface_found {
+            structured["surface"] = found.to_json();
+        }
         if let Some(r) = tree_result.as_ref() {
             r.walk.apply(&mut structured);
         }
@@ -908,6 +955,7 @@ impl Tool for GetWindowStateTool {
                     window_id: u64::from(window_id),
                     key: cua_driver_core::window_state_view::ViewKey {
                         query: query.clone(),
+                        surface: surface.clone(),
                         max_elements,
                         max_depth: args
                             .get("max_depth")
@@ -985,6 +1033,43 @@ fn focused_element_description(
 /// walking under `owner_pid` while echoing the requested pid would hand back
 /// indices the caller replays against the wrong key. One retry with the named
 /// pid is correct and cheap.
+/// The structured refusal of a `surface` read with no such surface open.
+fn surface_not_found(
+    pid: i32,
+    window_id: u32,
+    wanted: &str,
+    open: &[crate::ax::surfaces::Surface],
+) -> ToolResult {
+    let listed: Vec<serde_json::Value> = open
+        .iter()
+        .filter(|surface| surface.kind != "focused" || wanted == "focused")
+        .map(crate::ax::surfaces::Surface::to_json)
+        .collect();
+    let kinds: Vec<&str> = open
+        .iter()
+        .map(|surface| surface.kind)
+        .filter(|kind| *kind != "focused")
+        .collect();
+    ToolResult::error(format!(
+        "get_window_state: no {wanted} is open for pid {pid} window {window_id} (open: {}). \
+         Read the whole window without `surface`, or wait for it with \
+         wait {{\"pid\":{pid},\"surface\":\"{wanted}\"}}.",
+        if kinds.is_empty() {
+            "none".to_owned()
+        } else {
+            kinds.join(", ")
+        }
+    ))
+    .with_structured(serde_json::json!({
+        "code": "surface_not_found",
+        "tool": "get_window_state",
+        "pid": pid,
+        "window_id": window_id,
+        "surface": wanted,
+        "open_surfaces": listed,
+    }))
+}
+
 fn window_scope_refusal(
     pid: i32,
     window_id: u32,

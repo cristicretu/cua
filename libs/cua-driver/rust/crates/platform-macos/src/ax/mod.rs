@@ -22,6 +22,7 @@ pub mod exact_target;
 pub mod launch;
 pub mod reveal_scroll;
 pub mod snapshot;
+pub mod surfaces;
 pub mod tree;
 pub mod window_scope;
 

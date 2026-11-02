@@ -54,6 +54,7 @@ The MCP server instructions carry the same rules, so they apply even when this f
 | Observe one window                        | `get_window_state({pid, window_id, query})`                                                           | [Workflow](WORKFLOW.md)                               |
 | Act on a control                          | `click` / `type_text` with a fresh `element_token` and exact window target                            | [Workflow](WORKFLOW.md)                               |
 | Act and see what changed in one call      | `run_steps({steps:[{tool,args},...], observe:{}})`; stops at the first failure                        | [Workflow](WORKFLOW.md#batch-known-actions)           |
+| Wait for a dialog, menu or element      | `wait({app, window})`, `wait({pid, surface:"menu"})`, `wait({pid, window_id, role, name})`; also a run_steps step | [Workflow](WORKFLOW.md#wait-for-a-state)              |
 | Loop, branch or retry in one call         | `run_script({script})`: JavaScript over the `cua` API, sandboxed, time and call limits                | [Workflow](WORKFLOW.md#script-a-flow)                 |
 | Use pixels when semantics cannot reach it | Fresh target screenshot, then `x,y` on the same target                                                | [Workflow](WORKFLOW.md)                               |
 | Verify the outcome                        | `verify_state({pid, window_id, expect})` or a fresh snapshot read by the agent                        | [Workflow](WORKFLOW.md)                               |
