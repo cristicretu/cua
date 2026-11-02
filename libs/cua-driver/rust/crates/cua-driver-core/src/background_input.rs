@@ -44,9 +44,13 @@ pub enum ElementAncestry {
     ProvenDescendant,
     /// The live element ascends to a different window of the same process.
     OutsideTargetWindow,
-    /// Ancestry could not be resolved (dead element, SPI failure). An address
-    /// the shell cannot re-prove is not an exact target.
+    /// Ancestry could not be resolved (SPI failure, a broken parent chain).
+    /// An address the shell cannot re-prove is not an exact target.
     Unproven,
+    /// The element itself is gone (`kAXErrorInvalidUIElement`). Reported as
+    /// a stale token rather than as foreign ancestry: the element did not
+    /// move to another window, it no longer exists.
+    Invalid,
 }
 
 /// Fresh facts about one exact target, gathered by the platform shell.
@@ -256,6 +260,15 @@ pub fn decide_background_input(
 
     match facts.element {
         ElementAncestry::NotAddressed | ElementAncestry::ProvenDescendant => {}
+        ElementAncestry::Invalid => {
+            return refuse(
+                crate::ref_identity::STALE_ELEMENT_TOKEN,
+                "the addressed element no longer exists (AX error -25202); nothing was sent. \
+                 Take a fresh get_window_state snapshot and act with a new token"
+                    .to_owned(),
+                Some("get_window_state"),
+            );
+        }
         ElementAncestry::OutsideTargetWindow | ElementAncestry::Unproven => {
             return refuse(
                 refusal_codes::ELEMENT_OUTSIDE_TARGET_WINDOW,
@@ -669,6 +682,24 @@ mod tests {
                     "{action:?} with {element:?}"
                 );
             }
+        }
+    }
+
+    /// A dead element is a stale token, not an element in another window:
+    /// `element_outside_target_window` sent agents hunting for a window that
+    /// never mattered.
+    #[test]
+    fn dead_element_refuses_every_route_as_a_stale_token() {
+        let facts = BackgroundTargetFacts {
+            element: ElementAncestry::Invalid,
+            ..matched_facts()
+        };
+        for action in ALL_ACTIONS {
+            assert_eq!(
+                code_of(decide_background_input(TARGET, &facts, action)),
+                crate::ref_identity::STALE_ELEMENT_TOKEN,
+                "{action:?}"
+            );
         }
     }
 
