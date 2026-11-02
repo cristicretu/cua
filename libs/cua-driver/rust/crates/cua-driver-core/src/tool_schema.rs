@@ -104,6 +104,19 @@ pub fn element_token_schema() -> Value {
     })
 }
 
+/// The `timeout_ms` argument of an element-token action: how long to wait for
+/// the target to become actionable (see `crate::actionability`).
+pub fn actionability_timeout_schema() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": crate::actionability::MAX_TIMEOUT_MS,
+        "description": "With element_token: ms to wait for the element to become actionable \
+            (visible, enabled, not moving, editable) before acting. Default 5000 (type_text: +30 per character); 0 checks once. \
+            A timeout returns actionability_timeout naming the check; nothing was sent."
+    })
+}
+
 /// Default and bounds for the per-call accessibility-walk budget
 /// (`timeout_ms`), the same on every platform.
 pub const TIMEOUT_MS_DEFAULT: u64 = 1000;
