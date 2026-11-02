@@ -106,6 +106,14 @@ impl ClipboardBackend for MacosClipboard {
         let path = absolute_existing_file(absolute_path)?;
         self.with_context(|context| context.set_files(vec![path]).map_err(|e| e.to_string()))
     }
+
+    fn supports_clear(&self) -> bool {
+        true
+    }
+
+    fn clear(&self) -> Result<(), String> {
+        self.with_context(|context| context.clear().map_err(|e| e.to_string()))
+    }
 }
 
 #[cfg(test)]

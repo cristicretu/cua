@@ -20,12 +20,27 @@ pub trait ClipboardBackend: Send + Sync {
     fn write_text(&self, text: String) -> Result<(), String>;
     fn write_image(&self, absolute_path: &str) -> Result<(), String>;
     fn write_file_url(&self, absolute_path: &str) -> Result<(), String>;
+    /// Whether [`ClipboardBackend::clear`] is implemented. `clipboard_clear`
+    /// is registered only for backends that say so, so a platform without it
+    /// does not advertise a tool that always fails.
+    fn supports_clear(&self) -> bool {
+        false
+    }
+    /// Remove every item from the system clipboard.
+    fn clear(&self) -> Result<(), String> {
+        Err("clearing the clipboard is not implemented on this platform".to_owned())
+    }
 }
 
 pub fn register_clipboard_tools(registry: &mut ToolRegistry, backend: Arc<dyn ClipboardBackend>) {
     registry.register(Box::new(ClipboardReadTool {
         backend: backend.clone(),
     }));
+    if backend.supports_clear() {
+        registry.register(Box::new(ClipboardClearTool {
+            backend: backend.clone(),
+        }));
+    }
     registry.register(Box::new(ClipboardWriteTool { backend }));
 }
 
@@ -173,6 +188,80 @@ impl Tool for ClipboardWriteTool {
     }
 }
 
+/// `clipboard_clear` — empty the system clipboard and prove it is empty.
+///
+/// Runtime-only (not in the portable contract): agents that put a secret or a
+/// large payload on the clipboard to paste it can remove it afterwards.
+/// The readback is the format list, so no content is read.
+pub struct ClipboardClearTool {
+    backend: Arc<dyn ClipboardBackend>,
+}
+
+static CLEAR_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
+
+fn clear_def() -> &'static ToolDef {
+    CLEAR_DEF.get_or_init(|| ToolDef {
+        name: "clipboard_clear".into(),
+        description: "Empty the system clipboard, then verify no types remain. Reads no \
+            clipboard content."
+            .into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": { "session": crate::tool_schema::session_schema() },
+            "additionalProperties": false,
+        }),
+        read_only: false,
+        destructive: true,
+        idempotent: true,
+        open_world: false,
+    })
+}
+
+#[async_trait]
+impl Tool for ClipboardClearTool {
+    fn def(&self) -> &ToolDef {
+        clear_def()
+    }
+
+    async fn invoke(&self, args: Value) -> ToolResult {
+        if let Some(unknown) = args
+            .as_object()
+            .and_then(|map| map.keys().find(|key| !key.starts_with('_') && *key != "session"))
+        {
+            return ToolResult::error(format!("clipboard_clear: unknown argument `{unknown}`"));
+        }
+        let backend = self.backend.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            backend.clear()?;
+            Ok::<_, String>(normalize_types(backend.available_formats()?))
+        })
+        .await;
+        let remaining = match result {
+            Ok(Ok(types)) => types,
+            Ok(Err(error)) => return unavailable("clear", error),
+            Err(error) => return unavailable("clear", format!("worker failed: {error}")),
+        };
+        let cleared = remaining.is_empty();
+        let structured = serde_json::json!({
+            "supported": true,
+            "cleared": cleared,
+            "types": remaining,
+            "privacy_sensitive": true,
+            "content_redacted_from_telemetry": true,
+        });
+        if cleared {
+            ToolResult::text("Clipboard cleared; no types remain.").with_structured(structured)
+        } else {
+            ToolResult::error(format!(
+                "Clipboard clear ran, but {} type(s) remain (another process may have written \
+                 to it).",
+                remaining.len()
+            ))
+            .with_structured(structured)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +331,99 @@ mod tests {
             *self.value.lock().unwrap() = Some(("text/uri-list".into(), absolute_path.into()));
             Ok(())
         }
+
+        fn supports_clear(&self) -> bool {
+            true
+        }
+
+        fn clear(&self) -> Result<(), String> {
+            *self.value.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    /// A clipboard another process writes to again right after a clear.
+    struct RefillingClipboard;
+
+    impl ClipboardBackend for RefillingClipboard {
+        fn available_formats(&self) -> Result<Vec<String>, String> {
+            Ok(vec!["text/plain".into()])
+        }
+        fn read_text(&self) -> Result<Option<String>, String> {
+            panic!("clipboard_clear must never read content")
+        }
+        fn write_text(&self, _text: String) -> Result<(), String> {
+            unreachable!()
+        }
+        fn write_image(&self, _absolute_path: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn write_file_url(&self, _absolute_path: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn supports_clear(&self) -> bool {
+            true
+        }
+        fn clear(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_empties_the_clipboard_and_verifies_by_types() {
+        let backend: Arc<dyn ClipboardBackend> = Arc::new(FakeClipboard::default());
+        backend.write_text("secret".into()).unwrap();
+        let result = ClipboardClearTool {
+            backend: backend.clone(),
+        }
+        .invoke(serde_json::json!({"session": "s"}))
+        .await;
+        assert_ne!(result.is_error, Some(true));
+        let output = result.structured_content.unwrap();
+        assert_eq!(output["cleared"], true);
+        assert_eq!(output["types"], serde_json::json!([]));
+        assert!(!output.to_string().contains("secret"));
+        assert!(backend.available_formats().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_reports_remaining_types_instead_of_claiming_success() {
+        let result = ClipboardClearTool {
+            backend: Arc::new(RefillingClipboard),
+        }
+        .invoke(serde_json::json!({}))
+        .await;
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(result.structured_content.unwrap()["cleared"], false);
+    }
+
+    #[tokio::test]
+    async fn clear_is_unavailable_on_backends_without_it_and_rejects_unknown_args() {
+        let result = ClipboardClearTool {
+            backend: Arc::new(UnavailableClipboard),
+        }
+        .invoke(serde_json::json!({}))
+        .await;
+        assert_eq!(
+            result.structured_content.unwrap()["error_code"],
+            "clipboard_unavailable"
+        );
+        let result = ClipboardClearTool {
+            backend: Arc::new(FakeClipboard::default()),
+        }
+        .invoke(serde_json::json!({"text": "x"}))
+        .await;
+        assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn clear_is_registered_only_for_backends_that_support_it() {
+        let mut registry = ToolRegistry::new();
+        register_clipboard_tools(&mut registry, Arc::new(UnavailableClipboard));
+        assert!(registry.get_def("clipboard_clear").is_none());
+        let mut registry = ToolRegistry::new();
+        register_clipboard_tools(&mut registry, Arc::new(FakeClipboard::default()));
+        assert!(registry.get_def("clipboard_clear").is_some());
     }
 
     #[tokio::test]
