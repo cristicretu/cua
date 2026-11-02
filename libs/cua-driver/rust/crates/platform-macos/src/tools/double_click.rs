@@ -54,6 +54,7 @@ fn def() -> &'static ToolDef {
                 "y":             { "type": "number",  "description": "Screen Y coordinate (pixel path)." },
                 "window_id":     { "type": "integer", "description": "CGWindowID. Omit when element_token is supplied (the token carries it)." },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "timeout_ms": cua_driver_core::tool_schema::actionability_timeout_schema(),
                 "delivery_mode": cua_driver_core::tool_schema::delivery_mode_schema()
             },
             "additionalProperties": false
@@ -83,7 +84,7 @@ impl Tool for DoubleClickTool {
         let delivery_mode = super::DeliveryMode::parse(args.opt_str("delivery_mode").as_deref());
         let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match super::resolve_element(&self.state, pid, &args).await {
+        let (resolved, target) = match super::resolve_target(&self.state, pid, &args).await {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -94,8 +95,8 @@ impl Tool for DoubleClickTool {
         };
 
         // ── AX element path ──────────────────────────────────────────────────
-        if let (Some(idx), Some(wid), Some(element_guard)) =
-            (element_index, window_id, element_guard)
+        if let (Some(idx), Some(wid), Some(element_guard), Some(mut target)) =
+            (element_index, window_id, element_guard, target)
         {
             let element_ptr = element_guard.as_ptr();
 
@@ -111,10 +112,35 @@ impl Tool for DoubleClickTool {
             })
             .await
             .unwrap_or(false);
+            // Actionability: AXOpen is semantic; the pixel double-click needs
+            // the element's centre inside its window and the element still.
+            // Waits hold no lease; the re-check runs under it.
+            let kind = cua_driver_core::actionability::ActionKind::DoubleClick;
+            let timeout = match cua_driver_core::actionability::timeout_from_args(&args, kind, 0) {
+                Ok(timeout) => timeout,
+                Err(error) => return error,
+            };
+            let request = if has_ax_open {
+                cua_driver_core::actionability::ActionRequest::semantic(kind)
+            } else {
+                cua_driver_core::actionability::ActionRequest::pointer(kind)
+            }
+            .foreground(delivery_mode.is_foreground());
+            let mut waiter = target.waiter(request, timeout);
+            if let Err(refusal) = target.await_actionable(&mut waiter).await {
+                return refusal;
+            }
             let _mutation_lease = if !delivery_mode.is_foreground() {
                 let action = background_action_for_element(has_ax_open);
-                match super::gate_background_window_action(pid, wid, Some(element_ptr), action)
-                    .await
+                match super::gate_actionable_window_action(
+                    &mut target,
+                    &mut waiter,
+                    pid,
+                    wid,
+                    Some(element_ptr),
+                    action,
+                )
+                .await
                 {
                     Ok(lease) => Some(lease),
                     Err(refusal_result) => return refusal_result,

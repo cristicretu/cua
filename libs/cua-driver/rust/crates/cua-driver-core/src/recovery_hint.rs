@@ -300,6 +300,27 @@ static RULES: &[Rule] = &[
         },
     },
     Rule {
+        codes: &["actionability_timeout"],
+        build: |c| {
+            RecoveryHint::new(
+                "The element stayed disabled, hidden or moving for the whole timeout, so nothing was \
+                 sent. Read the window to see why; retry once it is ready, with a longer timeout_ms \
+                 if it is slow.",
+            )
+            .call(c.read_window())
+        },
+    },
+    Rule {
+        codes: &["element_not_editable", "action_not_supported"],
+        build: |c| {
+            RecoveryHint::new(
+                "That element cannot take this action, so nothing was sent. Read the window and pick \
+                 the element that can (the text field, not its label), or another tool.",
+            )
+            .call(c.read_window())
+        },
+    },
+    Rule {
         codes: &["element_not_visible", "element_bounds_unavailable"],
         build: |c| {
             RecoveryHint::new(

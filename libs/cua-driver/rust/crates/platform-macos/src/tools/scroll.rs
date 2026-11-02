@@ -100,6 +100,7 @@ fn def() -> &'static ToolDef {
                 },
                 "window_id": { "type": "integer", "description": "Window ID. Required with x/y; optional with element_token." },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "timeout_ms": cua_driver_core::tool_schema::actionability_timeout_schema(),
                 "x": { "type": "number", "description": "Window-local screenshot X (get_window_state PNG). With y, wheel-scrolls at that point; needs window_id." },
                 "y": { "type": "number", "description": "Window-local screenshot Y." },
                 "scope": { "type": "string", "enum": ["window", "desktop"], "default": "window", "description": "\"desktop\" with x,y and no pid/window_id uses get_desktop_state coordinates." },
@@ -188,7 +189,7 @@ impl Tool for ScrollTool {
         let by = args.str_or("by", "line");
         let amount = clamp_amount(args.u64_or("amount", 3));
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match super::resolve_element(&self.state, pid, &args).await {
+        let (resolved, target) = match super::resolve_target(&self.state, pid, &args).await {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -200,6 +201,44 @@ impl Tool for ScrollTool {
         let pre_focus_ptr: Option<usize> = pre_focus_guard.as_ref().map(|g| g.as_ptr());
 
         let mut _mutation_lease: Option<super::BackgroundMutationLease> = None;
+
+        // ── Actionability (wait without the lease) ──
+        // A token-addressed scroll waits for a disabled or zero-size target.
+        // It is checked as semantic delivery: the reveal pre-step
+        // (AXScrollToVisible) moves an off-window element into view before
+        // the wheel route revalidates its own pointer target. In background
+        // the lease is then taken here, with the semantic gate every element
+        // branch below starts from, so the re-check runs under it.
+        if let Some(mut target) = target {
+            let kind = cua_driver_core::actionability::ActionKind::Scroll;
+            let timeout = match cua_driver_core::actionability::timeout_from_args(&args, kind, 0) {
+                Ok(timeout) => timeout,
+                Err(error) => return error,
+            };
+            let mut waiter = target.waiter(
+                cua_driver_core::actionability::ActionRequest::semantic(kind)
+                    .foreground(delivery_mode.is_foreground()),
+                timeout,
+            );
+            if let Err(refusal) = target.await_actionable(&mut waiter).await {
+                return refusal;
+            }
+            if let (false, Some(wid)) = (delivery_mode.is_foreground(), window_id) {
+                match super::gate_actionable_window_action(
+                    &mut target,
+                    &mut waiter,
+                    pid,
+                    wid,
+                    pre_focus_ptr,
+                    cua_driver_core::background_input::BackgroundAction::AxSemantic,
+                )
+                .await
+                {
+                    Ok(lease) => _mutation_lease = Some(lease),
+                    Err(refusal) => return refusal,
+                }
+            }
+        }
 
         // AppKit exposes vertical scroll-bar buttons beneath the text area's
         // AXScrollArea parent. Pressing those controls is a true

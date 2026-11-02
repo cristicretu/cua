@@ -333,6 +333,7 @@ fn def() -> &'static ToolDef {
                 "pid":           { "type": "integer", "description": "Target process ID. Optional with element_token (it carries the pid)." },
                 "window_id":     { "type": "integer", "description": "Target window ID. Omit with element_token." },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "timeout_ms": cua_driver_core::tool_schema::actionability_timeout_schema(),
                 "capture_id": { "type": "string", "description": "Optional capture ID from get_window_state or get_desktop_state. With x,y it is consumed atomically; stale or mismatched captures are refused." },
                 "x":             { "type": "number",  "description": "X in screenshot pixels (get_window_state PNG, or get_desktop_state PNG for a desktop target)." },
                 "y":             { "type": "number",  "description": "Y in screenshot pixels from the image selected by target." },
@@ -533,7 +534,7 @@ impl Tool for ClickTool {
         let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
 
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match super::resolve_element(&self.state, pid, &args).await {
+        let (resolved, target) = match super::resolve_target(&self.state, pid, &args).await {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -603,25 +604,53 @@ impl Tool for ClickTool {
             }));
         }
 
-        if let (Some(idx), Some(wid), Some(element_guard)) =
-            (element_index, window_id, element_guard)
+        if let (Some(idx), Some(wid), Some(element_guard), Some(mut target)) =
+            (element_index, window_id, element_guard, target)
         {
             let element_ptr = element_guard.as_ptr();
+
+            // ── Actionability (wait without the lease) ──
+            // A disabled, zero-size or (for the pointer middle-click) moving
+            // or off-window target is polled until it can take the click or
+            // the timeout_ms budget runs out; see cua_driver_core::actionability.
+            let kind = click_action_kind(&action, &button_str);
+            let timeout = match cua_driver_core::actionability::timeout_from_args(&args, kind, 0) {
+                Ok(timeout) => timeout,
+                Err(error) => return error,
+            };
+            let request = if button_str == "middle" {
+                cua_driver_core::actionability::ActionRequest::pointer(kind)
+            } else {
+                cua_driver_core::actionability::ActionRequest::semantic(kind)
+            }
+            .foreground(delivery_mode.is_foreground());
+            let mut waiter = target.waiter(request, timeout);
+            if let Err(refusal) = target.await_actionable(&mut waiter).await {
+                return refusal;
+            }
 
             // ── Exact-target background gate (macOS background input v1) ──
             // The element branch is semantic AX delivery, except button=middle
             // which falls back to a routed pixel click at the element's center
             // and is therefore held to the stricter WindowPointer rung. Gate
             // BEFORE any cursor/dispatch work so a stale or sibling-owned
-            // target refuses instead of acting on the wrong window.
+            // target refuses instead of acting on the wrong window; the
+            // actionability re-check runs under the lease.
             let _mutation_lease = if !delivery_mode.is_foreground() {
                 let gate_action = if button_str == "middle" {
                     cua_driver_core::background_input::BackgroundAction::WindowPointer
                 } else {
                     cua_driver_core::background_input::BackgroundAction::AxSemantic
                 };
-                match super::gate_background_window_action(pid, wid, Some(element_ptr), gate_action)
-                    .await
+                match super::gate_actionable_window_action(
+                    &mut target,
+                    &mut waiter,
+                    pid,
+                    wid,
+                    Some(element_ptr),
+                    gate_action,
+                )
+                .await
                 {
                     Ok(lease) => Some(lease),
                     Err(refusal_result) => return refusal_result,
@@ -1955,6 +1984,19 @@ mod selection_fallback_tests {
 /// background focus rung that pixel `type_text`, `press_key` and `scroll`
 /// use to put the keyboard focus on a point (`focus_by_pixel`). It sets
 /// AXFocused on the element under the point instead of pressing it.
+/// The actionability kind of an element click. `show_menu` (or a right
+/// button) opens a context menu; the reveal actions only show alternate UI
+/// and need no enabled control (agent-desktop's hover row).
+fn click_action_kind(action: &str, button: &str) -> cua_driver_core::actionability::ActionKind {
+    use cua_driver_core::actionability::ActionKind;
+    match crate::input::ax_actions::map_action(action) {
+        Ok("AXShowMenu") => ActionKind::RightClick,
+        Ok("AXShowAlternateUI" | "AXShowDefaultUI") => ActionKind::Hover,
+        _ if button == "right" => ActionKind::RightClick,
+        _ => ActionKind::Click,
+    }
+}
+
 fn validate_click_action(action: &str, element_target: bool) -> anyhow::Result<()> {
     if !element_target && action == "focus" {
         return Ok(());
@@ -1965,6 +2007,24 @@ fn validate_click_action(action: &str, element_target: bool) -> anyhow::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The actionability kind follows the AX action: a context menu is a
+    /// right-click, the reveal actions need no enabled control.
+    #[test]
+    fn click_actions_map_to_their_actionability_kind() {
+        use cua_driver_core::actionability::ActionKind;
+        assert_eq!(click_action_kind("press", "left"), ActionKind::Click);
+        assert_eq!(click_action_kind("press", "right"), ActionKind::RightClick);
+        assert_eq!(
+            click_action_kind("show_menu", "left"),
+            ActionKind::RightClick
+        );
+        assert_eq!(
+            click_action_kind("show_alternate_ui", "left"),
+            ActionKind::Hover
+        );
+        assert_eq!(click_action_kind("confirm", "middle"), ActionKind::Click);
+    }
 
     /// The pixel focus rung keeps working after unknown AX action names
     /// started refusing: background pixel typing into Electron depended on it.

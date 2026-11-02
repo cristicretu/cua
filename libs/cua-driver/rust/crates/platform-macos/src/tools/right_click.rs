@@ -46,6 +46,7 @@ fn def() -> &'static ToolDef {
                 "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
                 "pid": { "type": "integer", "description": "Target process ID. Optional with element_token (the token carries the pid)." },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "timeout_ms": cua_driver_core::tool_schema::actionability_timeout_schema(),
                 "window_id": {
                     "type": "integer",
                     "description": "CGWindowID. Omit when element_token is supplied (the token carries it)."
@@ -99,7 +100,7 @@ impl Tool for RightClickTool {
         let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
 
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match super::resolve_element(&self.state, pid, &args).await {
+        let (resolved, target) = match super::resolve_target(&self.state, pid, &args).await {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -127,12 +128,28 @@ impl Tool for RightClickTool {
         }
 
         // ── AX element path ──────────────────────────────────────────────────
-        if let (Some(idx), Some(wid), Some(element_guard)) =
-            (element_index, window_id, element_guard)
+        if let (Some(idx), Some(wid), Some(element_guard), Some(mut target)) =
+            (element_index, window_id, element_guard, target)
         {
             let element_ptr = element_guard.as_ptr();
 
-            let _mutation_lease = match super::gate_background_window_action(
+            // Actionability: AXShowMenu is semantic and always background.
+            // Waits hold no lease; the re-check runs under it.
+            let kind = cua_driver_core::actionability::ActionKind::RightClick;
+            let timeout = match cua_driver_core::actionability::timeout_from_args(&args, kind, 0) {
+                Ok(timeout) => timeout,
+                Err(error) => return error,
+            };
+            let mut waiter = target.waiter(
+                cua_driver_core::actionability::ActionRequest::semantic(kind),
+                timeout,
+            );
+            if let Err(refusal) = target.await_actionable(&mut waiter).await {
+                return refusal;
+            }
+            let _mutation_lease = match super::gate_actionable_window_action(
+                &mut target,
+                &mut waiter,
                 pid,
                 wid,
                 Some(element_ptr),

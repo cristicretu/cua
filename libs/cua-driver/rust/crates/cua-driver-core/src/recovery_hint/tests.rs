@@ -296,6 +296,28 @@ fn a_stale_element_token_asks_for_a_fresh_read_of_the_same_window() {
 }
 
 #[test]
+fn an_actionability_refusal_asks_for_a_read_of_the_same_window() {
+    for code in [
+        "actionability_timeout",
+        "element_not_editable",
+        "action_not_supported",
+    ] {
+        let hint = hint_for(
+            "click",
+            &window_seed(),
+            true,
+            json!({"status": "refused", "code": code, "check": "enabled"}),
+        );
+        assert!(
+            hint.hint.contains("nothing was sent"),
+            "{code}: {}",
+            hint.hint
+        );
+        assert_eq!(call_value(&hint)["tool"], "get_window_state", "{code}");
+    }
+}
+
+#[test]
 fn a_window_target_comes_from_the_typed_target_when_the_call_has_no_top_level_ids() {
     let hint = hint_for(
         "click",
