@@ -3,6 +3,7 @@ use crate::element_token::{
     STALE_TOKEN_ERROR,
 };
 use crate::protocol::ToolResult;
+use crate::ref_identity::RefIdentity;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -20,6 +21,13 @@ pub trait SnapshotPayload: Send + Sync + 'static {
         self.len() == 0
     }
     fn retain(&self, index: usize) -> Option<Self::Element>;
+    /// Identity evidence recorded for element `index` at snapshot time, which
+    /// dispatch re-checks against the live element
+    /// ([`crate::ref_identity::check_identity`]). `None` when the payload
+    /// records none; the retained element is then the only identity.
+    fn identity(&self, _index: usize) -> Option<RefIdentity> {
+        None
+    }
 }
 
 struct Snapshot<S> {
@@ -649,11 +657,24 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         pid: i32,
         args: &serde_json::Value,
     ) -> Result<ResolvedElement<S::Element>, ToolResult> {
+        self.resolve_identified(pid, args)
+            .map(|(element, _identity)| element)
+    }
+
+    /// [`Self::resolve`] plus the identity evidence the snapshot recorded for
+    /// the element, read under the same lock so both describe one snapshot.
+    /// Dispatch must confirm that identity against the live element before
+    /// acting (see `crate::ref_identity`).
+    pub fn resolve_identified(
+        &self,
+        pid: i32,
+        args: &serde_json::Value,
+    ) -> Result<(ResolvedElement<S::Element>, Option<RefIdentity>), ToolResult> {
         let Some(token) = args
             .get("element_token")
             .and_then(serde_json::Value::as_str)
         else {
-            return Ok(ResolvedElement::None);
+            return Ok((ResolvedElement::None, None));
         };
         let window_arg = args["window_id"].as_u64();
         let inner = self.inner.lock().unwrap();
@@ -683,11 +704,15 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             .payload
             .retain(element_index)
             .ok_or_else(|| out_of_range_refusal(snapshot, element_index))?;
-        Ok(ResolvedElement::Element {
-            window_id: snapshot.window_id,
-            element_index,
-            element,
-        })
+        let identity = snapshot.payload.identity(element_index);
+        Ok((
+            ResolvedElement::Element {
+                window_id: snapshot.window_id,
+                element_index,
+                element,
+            },
+            identity,
+        ))
     }
 
     pub fn remove(&self, pid: i32, window_id: u64) -> Option<u32> {
@@ -808,6 +833,46 @@ mod tests {
             result,
             ResolvedElement::Element { element: 30, .. }
         ));
+    }
+
+    #[test]
+    fn resolution_carries_the_identity_recorded_for_that_element() {
+        struct Identified(Vec<&'static str>);
+        impl SnapshotPayload for Identified {
+            type Element = usize;
+            fn len(&self) -> usize {
+                self.0.len()
+            }
+            fn retain(&self, index: usize) -> Option<usize> {
+                (index < self.0.len()).then_some(index)
+            }
+            fn identity(&self, index: usize) -> Option<RefIdentity> {
+                let title = self.0.get(index)?;
+                Some(RefIdentity::new(
+                    "AXButton",
+                    None,
+                    None,
+                    Some(title),
+                    None,
+                    None,
+                    None,
+                    vec![],
+                ))
+            }
+        }
+        let cache = SnapshotStore::new();
+        let id = cache.publish(42, 7, Identified(vec!["Open", "Save"]));
+        let args = serde_json::json!({ "element_token": token_for(id, 1) });
+        let (element, identity) = cache.resolve_identified(42, &args).unwrap();
+        assert!(matches!(
+            element,
+            ResolvedElement::Element { element: 1, .. }
+        ));
+        assert_eq!(identity.unwrap().title.as_deref(), Some("Save"));
+        let (none, identity) = cache
+            .resolve_identified(42, &serde_json::json!({}))
+            .unwrap();
+        assert!(matches!(none, ResolvedElement::None) && identity.is_none());
     }
 
     #[test]

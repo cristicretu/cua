@@ -14,7 +14,8 @@ use cua_driver_core::background_input::{
 
 use super::bindings::{
     ax_get_window_id, copy_ax_windows_including, copy_bool_attr, copy_element_attr,
-    copy_string_attr, focused_element_of_pid, AXUIElementCreateApplication, AXUIElementRef,
+    copy_string_attr, focused_element_of_pid, kAXErrorInvalidUIElement,
+    AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementRef,
 };
 use super::snapshot::RetainedElement;
 use crate::windows::{all_windows_without_spaces, resolve_window_owner, WindowOwner};
@@ -78,13 +79,42 @@ pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
 }
 
 /// Decide an addressed element's ancestry from what was read about it.
-fn element_ancestry(window: Option<u32>, in_app_menu_bar: bool, requested: u32) -> ElementAncestry {
+/// `invalid` (the element answers `kAXErrorInvalidUIElement`) is consulted
+/// only when no window was proven: a dead element is a stale token, not an
+/// element of another window.
+fn element_ancestry(
+    window: Option<u32>,
+    in_app_menu_bar: bool,
+    invalid: bool,
+    requested: u32,
+) -> ElementAncestry {
     match window {
         Some(id) if id == requested => ElementAncestry::ProvenDescendant,
         Some(_) => ElementAncestry::OutsideTargetWindow,
         None if in_app_menu_bar => ElementAncestry::ProvenDescendant,
+        None if invalid => ElementAncestry::Invalid,
         None => ElementAncestry::Unproven,
     }
+}
+
+/// Whether the element itself is gone: its `AXRole` read fails with
+/// `kAXErrorInvalidUIElement`.
+///
+/// # Safety
+///
+/// `element` must be a retained `AXUIElementRef`.
+unsafe fn element_is_invalid(element: AXUIElementRef) -> bool {
+    let attr = core_foundation::string::CFString::new("AXRole");
+    let mut value: CFTypeRef = std::ptr::null();
+    let error = AXUIElementCopyAttributeValue(
+        element,
+        core_foundation::base::TCFType::as_concrete_TypeRef(&attr),
+        &mut value,
+    );
+    if !value.is_null() {
+        CFRelease(value);
+    }
+    error == kAXErrorInvalidUIElement
 }
 
 /// Whether `element` sits under the application's own `AXMenuBar`: a bounded
@@ -322,7 +352,8 @@ pub fn gather_background_facts(
                 // A menu-bar item has no window ancestor: the menu bar hangs
                 // off the application. It still belongs to this app.
                 let in_menu_bar = window.is_none() && element_in_app_menu_bar(app, element);
-                element_ancestry(window, in_menu_bar, window_id)
+                let invalid = window.is_none() && !in_menu_bar && element_is_invalid(element);
+                element_ancestry(window, in_menu_bar, invalid, window_id)
             });
             let focused_window_id = copy_element_attr(app, "AXFocusedWindow").and_then(|window| {
                 let window_id = ax_get_window_id(window);
@@ -386,10 +417,24 @@ mod tests {
     fn menu_bar_item_is_proven_only_through_the_app_menu_bar() {
         use super::element_ancestry;
         use cua_driver_core::background_input::ElementAncestry::*;
-        assert_eq!(element_ancestry(None, true, 7), ProvenDescendant);
-        assert_eq!(element_ancestry(None, false, 7), Unproven);
-        assert_eq!(element_ancestry(Some(7), false, 7), ProvenDescendant);
-        assert_eq!(element_ancestry(Some(8), true, 7), OutsideTargetWindow);
+        assert_eq!(element_ancestry(None, true, false, 7), ProvenDescendant);
+        assert_eq!(element_ancestry(None, false, false, 7), Unproven);
+        assert_eq!(element_ancestry(Some(7), false, false, 7), ProvenDescendant);
+        assert_eq!(
+            element_ancestry(Some(8), true, false, 7),
+            OutsideTargetWindow
+        );
+    }
+
+    #[test]
+    fn a_dead_element_is_invalid_not_foreign() {
+        use super::element_ancestry;
+        use cua_driver_core::background_input::ElementAncestry::*;
+        assert_eq!(element_ancestry(None, false, true, 7), Invalid);
+        assert_eq!(
+            element_ancestry(Some(8), false, true, 7),
+            OutsideTargetWindow
+        );
     }
 
     #[test]

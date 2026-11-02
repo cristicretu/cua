@@ -95,6 +95,12 @@ pub struct AXNode {
     /// This trust marker is independent of actionable ancestry because
     /// AXWebArea is commonly non-actionable and therefore has no element index.
     pub in_web_content: bool,
+    /// AXSubrole, read for actionable nodes only (token identity evidence).
+    pub subrole: Option<String>,
+    /// Raw `AXChildren` indices from the walked top-level element down to
+    /// this node, collapsed layout containers included. Token identity
+    /// evidence for elements no text names (see `cua_driver_core::ref_identity`).
+    pub path: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -312,9 +318,11 @@ fn walk_tree_with_web_content(
         };
 
         // Walk each top-level child at depth 0.
+        let mut path = Vec::new();
         for child in walk_these {
             walk_element(
                 child,
+                &mut path,
                 0,
                 None,
                 false,
@@ -431,6 +439,7 @@ unsafe fn release_all(elements: Vec<AXUIElementRef>) {
 #[allow(clippy::too_many_arguments)]
 unsafe fn walk_element(
     element: AXUIElementRef,
+    path: &mut Vec<u32>,
     depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
@@ -467,9 +476,11 @@ unsafe fn walk_element(
         // collapse, so children inherit the parent's depth AND the same
         // parent_index (no actionable node was emitted here).
         let children = copy_children(element);
-        for child in children {
+        for (index, child) in children.into_iter().enumerate() {
+            path.push(index as u32);
             walk_element(
                 child,
+                path,
                 depth,
                 parent_index,
                 in_web_content,
@@ -480,6 +491,7 @@ unsafe fn walk_element(
                 max_depth,
                 include_web_content,
             );
+            path.pop();
             CFRelease(child as CFTypeRef);
         }
         return;
@@ -534,9 +546,11 @@ unsafe fn walk_element(
 
     if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
         let children = copy_children(element);
-        for child in children {
+        for (index, child) in children.into_iter().enumerate() {
+            path.push(index as u32);
             walk_element(
                 child,
+                path,
                 depth + 1,
                 parent_index,
                 in_web_content,
@@ -547,6 +561,7 @@ unsafe fn walk_element(
                 max_depth,
                 include_web_content,
             );
+            path.pop();
             CFRelease(child as CFTypeRef);
         }
         return;
@@ -571,6 +586,11 @@ unsafe fn walk_element(
         enabled,
         selected: copy_bool_attr(element, "AXSelected"),
     });
+    let subrole = if is_actionable {
+        copy_string_attr(element, "AXSubrole")
+    } else {
+        None
+    };
     let node = if is_actionable {
         let idx = *counter;
         *counter += 1;
@@ -609,6 +629,8 @@ unsafe fn walk_element(
             enabled: control_state.enabled,
             selected: control_state.selected,
             in_web_content,
+            subrole: subrole.clone(),
+            path: path.clone(),
         }
     } else {
         AXNode {
@@ -643,6 +665,8 @@ unsafe fn walk_element(
             enabled: control_state.enabled,
             selected: control_state.selected,
             in_web_content,
+            subrole: subrole.clone(),
+            path: path.clone(),
         }
     };
 
@@ -670,9 +694,11 @@ unsafe fn walk_element(
     }
 
     let children = copy_children(element);
-    for child in children {
+    for (index, child) in children.into_iter().enumerate() {
+        path.push(index as u32);
         walk_element(
             child,
+            path,
             depth + 1,
             next_parent,
             in_web_content,
@@ -683,6 +709,7 @@ unsafe fn walk_element(
             max_depth,
             include_web_content,
         );
+        path.pop();
         CFRelease(child as CFTypeRef);
     }
 }

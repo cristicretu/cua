@@ -188,7 +188,7 @@ impl Tool for ScrollTool {
         let by = args.str_or("by", "line");
         let amount = clamp_amount(args.u64_or("amount", 3));
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match self.state.snapshots.resolve(pid, &args) {
+        let resolved = match super::resolve_element(&self.state, pid, &args).await {
             Ok(r) => r,
             Err(e) => return e,
         };

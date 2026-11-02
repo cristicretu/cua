@@ -1,6 +1,7 @@
 use super::bindings::AXUIElementRef;
 use super::tree::AXNode;
 use core_foundation::base::{CFRelease, CFRetain, CFTypeRef};
+use cua_driver_core::ref_identity::RefIdentity;
 use cua_driver_core::snapshot_store::{SnapshotPayload, SnapshotStore};
 
 pub struct RetainedElement(usize);
@@ -39,18 +40,34 @@ impl Drop for RetainedElement {
 
 pub struct AxSnapshot {
     pub elements: Vec<usize>,
+    /// Identity evidence per element, parallel to `elements` (empty for
+    /// payloads built without a walk). Dispatch re-checks it against the
+    /// live element before acting; see `cua_driver_core::ref_identity`.
+    pub identities: Vec<RefIdentity>,
 }
 
 impl AxSnapshot {
     pub fn from_nodes(nodes: &[AXNode]) -> Self {
+        let tokenized = || nodes.iter().filter(|node| node.element_index.is_some());
         Self {
-            elements: nodes
-                .iter()
-                .filter(|node| node.element_index.is_some())
-                .map(|node| node.element_ptr)
-                .collect(),
+            elements: tokenized().map(|node| node.element_ptr).collect(),
+            identities: tokenized().map(identity_of).collect(),
         }
     }
+}
+
+/// The identity evidence a walk recorded for one node.
+pub fn identity_of(node: &AXNode) -> RefIdentity {
+    RefIdentity::new(
+        &node.role,
+        node.subrole.as_deref(),
+        node.identifier.as_deref(),
+        node.title.as_deref(),
+        node.description.as_deref(),
+        node.value.as_deref(),
+        node.frame,
+        node.path.clone(),
+    )
 }
 
 impl SnapshotPayload for AxSnapshot {
@@ -62,6 +79,9 @@ impl SnapshotPayload for AxSnapshot {
         self.elements
             .get(index)
             .map(|ptr| unsafe { RetainedElement::retain(*ptr) })
+    }
+    fn identity(&self, index: usize) -> Option<RefIdentity> {
+        self.identities.get(index).cloned()
     }
 }
 
@@ -101,6 +121,7 @@ mod tests {
         unsafe { CFRetain(ptr as CFTypeRef) };
         AxSnapshot {
             elements: vec![ptr],
+            identities: Vec::new(),
         }
     }
 

@@ -184,7 +184,7 @@ impl Tool for TypeTextTool {
         let text = cua_driver_core::text_sanitize::strip_trailing_agent_protocol_tags(&text_raw)
             .into_owned();
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match self.state.snapshots.resolve(pid, &args) {
+        let resolved = match super::resolve_element(&self.state, pid, &args).await {
             Ok(r) => r,
             Err(e) => return e,
         };

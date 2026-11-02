@@ -96,7 +96,7 @@ impl Tool for SetValueTool {
         };
 
         let (element_index, window_id, element_guard) =
-            match self.state.snapshots.resolve(pid, &args) {
+            match super::resolve_element(&self.state, pid, &args).await {
                 Ok(cua_driver_core::element_token::ResolvedElement::None) => {
                     return ToolResult::error(
                         "set_value requires element_token to address the target element.",
