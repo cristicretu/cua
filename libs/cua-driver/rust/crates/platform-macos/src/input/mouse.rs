@@ -15,6 +15,7 @@ use core_graphics::{
     event_source::{CGEventSource, CGEventSourceStateID},
     geometry::CGPoint,
 };
+use cua_driver_core::release_guard::ReleaseGuard;
 use foreign_types::ForeignType;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -240,15 +241,20 @@ fn click_at_xy_desktop_inner(
                 (pair_index + 1) as i64,
             );
             down.post(CGEventTapLocation::HID);
+            // The user's real button is down now: release it on every exit.
+            let held = ReleaseGuard::new(|| -> anyhow::Result<()> {
+                let up = CGEvent::new_mouse_event(source.clone(), up_ty, point, btn)
+                    .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(up) failed"))?;
+                up.set_flags(flags);
+                up.set_integer_value_field(
+                    core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
+                    (pair_index + 1) as i64,
+                );
+                up.post(CGEventTapLocation::HID);
+                Ok(())
+            });
             std::thread::sleep(std::time::Duration::from_millis(28));
-            let up = CGEvent::new_mouse_event(source.clone(), up_ty, point, btn)
-                .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(up) failed"))?;
-            up.set_flags(flags);
-            up.set_integer_value_field(
-                core_graphics::event::EventField::MOUSE_EVENT_CLICK_STATE,
-                (pair_index + 1) as i64,
-            );
-            up.post(CGEventTapLocation::HID);
+            held.release()?;
             if count > 1 {
                 std::thread::sleep(std::time::Duration::from_millis(80));
             }
@@ -469,31 +475,36 @@ fn click_at_xy_inner(
                 3,
                 post_mode,
             );
+            // From here the button is down in the target: release it on every
+            // exit, including a failed up-event creation below.
+            let post_up = || -> anyhow::Result<()> {
+                let up = CGEvent::new_mouse_event(
+                    source.clone(),
+                    CGEventType::LeftMouseUp,
+                    point,
+                    CGMouseButton::Left,
+                )
+                .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(up) failed"))?;
+                set_explicit_flags(&up, flags);
+                post_mouse_event_with_mode(
+                    pid,
+                    &up,
+                    window_local,
+                    wid,
+                    click_group_id,
+                    click_state,
+                    0,
+                    3,
+                    post_mode,
+                );
+                Ok(())
+            };
+            let held = ReleaseGuard::new(post_up);
             // 28 ms down→up gap: an NSButton's mouseDown enters a modal
             // tracking loop that polls for the matching mouseUp; too tight a
             // gap can race the loop's first poll and the click is dropped.
             std::thread::sleep(std::time::Duration::from_millis(28));
-
-            let up = CGEvent::new_mouse_event(
-                source.clone(),
-                CGEventType::LeftMouseUp,
-                point,
-                CGMouseButton::Left,
-            )
-            .map_err(|_| anyhow::anyhow!("CGEvent::new_mouse_event(up) failed"))?;
-            set_explicit_flags(&up, flags);
-
-            post_mouse_event_with_mode(
-                pid,
-                &up,
-                window_local,
-                wid,
-                click_group_id,
-                click_state,
-                0,
-                3,
-                post_mode,
-            );
+            held.release()?;
 
             if count > 1 {
                 std::thread::sleep(std::time::Duration::from_millis(80));
@@ -982,16 +993,8 @@ where
     let route = post_route(MousePostMode::SkyLightPreferred, skylight_available());
     let window_id = wid as i64;
 
-    let mut stopped_at: Option<(f64, f64)> = None;
-    let mut last_point = from;
-    for mut step in background_drag_plan(from, to, steps, duration_ms) {
-        if let Some(at) = stopped_at {
-            match step.kind {
-                Dragged => continue,
-                Up => step.point = at,
-                _ => {}
-            }
-        }
+    // Post one planned event: the same fields for every kind.
+    let post = |step: &BackgroundDragStep| -> anyhow::Result<()> {
         // (type, button, button number, subtype). Primers keep the click
         // recipe's left button and touch subtype; the gesture itself is a
         // plain mouse drag (subtype 0), like the foreground drag.
@@ -1023,15 +1026,51 @@ where
         crate::input::skylight::set_window_location(ptr, step.point.0, step.point.1);
         set_explicit_flags(&event, flags);
         dispatch_mouse_event(route, pid, &event);
+        Ok(())
+    };
+
+    let mut stopped_at: Option<(f64, f64)> = None;
+    let last_point = std::cell::Cell::new(from);
+    // Armed once the button is down: posts the release where the gesture
+    // stands on any early exit, so the target never keeps a held button.
+    let mut held = None;
+    for mut step in background_drag_plan(from, to, steps, duration_ms) {
+        if let Some(at) = stopped_at {
+            match step.kind {
+                Dragged => continue,
+                Up => step.point = at,
+                _ => {}
+            }
+        }
+        post(&step)?;
+        match step.kind {
+            Down => {
+                held = Some(ReleaseGuard::new(|| {
+                    post(&BackgroundDragStep {
+                        kind: Up,
+                        point: last_point.get(),
+                        phase: 3,
+                        click_state: 1,
+                        delay_after_ms: 0,
+                    })
+                }));
+            }
+            Up => {
+                if let Some(held) = held.take() {
+                    held.disarm();
+                }
+            }
+            _ => {}
+        }
         if matches!(step.kind, Down | Dragged) {
             observe(step.point.0, step.point.1);
-            last_point = step.point;
+            last_point.set(step.point);
         }
         if step.delay_after_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(step.delay_after_ms));
         }
         if step.kind == Dragged && stopped_at.is_none() && !keep_going() {
-            stopped_at = Some(last_point);
+            stopped_at = Some(last_point.get());
         }
     }
     Ok(match stopped_at {
@@ -1134,6 +1173,9 @@ where
     let events = foreground_drag_events(from_x, from_y, to_x, to_y, steps);
 
     super::keyboard::with_global_modifier_keys(modifiers, |flags| {
+        // Where the pressed button stands, for a release on an early exit.
+        let last = std::cell::Cell::new((CGPoint::new(from_x, from_y), from_local));
+        let mut held = None;
         for spec in events {
             let (event_type, click_state, event_button, event_button_number, subtype) = match spec
                 .kind
@@ -1182,6 +1224,37 @@ where
                 flags,
                 "foreground drag event creation failed",
             )?;
+            last.set((spec.point, local));
+            match spec.kind {
+                // The user's real button is down from here: any early exit
+                // posts its release where the gesture stands.
+                ForegroundDragEventKind::Down => {
+                    held = Some(ReleaseGuard::new(|| {
+                        let (point, local) = last.get();
+                        post_drag_mouse_event(
+                            pid,
+                            up_type,
+                            point,
+                            cg_button,
+                            local,
+                            wid,
+                            click_group_id,
+                            1,
+                            button_number,
+                            0,
+                            MousePostMode::HidOnly,
+                            flags,
+                            "foreground drag release creation failed",
+                        )
+                    }));
+                }
+                ForegroundDragEventKind::Up => {
+                    if let Some(held) = held.take() {
+                        held.disarm();
+                    }
+                }
+                _ => {}
+            }
 
             match spec.kind {
                 ForegroundDragEventKind::Move => {
@@ -1267,6 +1340,9 @@ where
     std::thread::sleep(std::time::Duration::from_millis(40));
 
     super::keyboard::with_global_modifier_keys(modifiers, |flags| {
+        // Where the pressed button stands, for a release on an early exit.
+        let last = std::cell::Cell::new(CGPoint::new(from_x, from_y));
+        let mut held = None;
         for spec in events {
             let event_type = match spec.kind {
                 ForegroundDragEventKind::Move => CGEventType::MouseMoved,
@@ -1284,6 +1360,25 @@ where
                 })?;
             event.set_flags(flags);
             event.post(CGEventTapLocation::HID);
+            last.set(spec.point);
+            match spec.kind {
+                // The user's real button is down from here: any early exit
+                // posts its release where the gesture stands.
+                ForegroundDragEventKind::Down => {
+                    held = Some(ReleaseGuard::new(|| {
+                        if let Ok(up) = new_global_mouse_event(up_type, last.get(), cg_button) {
+                            up.set_flags(flags);
+                            up.post(CGEventTapLocation::HID);
+                        }
+                    }));
+                }
+                ForegroundDragEventKind::Up => {
+                    if let Some(held) = held.take() {
+                        held.disarm();
+                    }
+                }
+                _ => {}
+            }
 
             match spec.kind {
                 ForegroundDragEventKind::Move => {
@@ -1505,24 +1600,26 @@ fn right_click_at_xy_inner(
         3,
         MousePostMode::SkyLightPreferred,
     );
+    // The button is down in the target: release it on every exit.
+    let held = ReleaseGuard::new(|| -> anyhow::Result<()> {
+        let up = CGEvent::new_mouse_event(source.clone(), up_type, point, button)
+            .map_err(|_| anyhow::anyhow!("mouse up failed"))?;
+        set_explicit_flags(&up, flags);
+        post_mouse_event_with_mode(
+            pid,
+            &up,
+            window_local,
+            wid,
+            click_group_id,
+            1,
+            button_number,
+            3,
+            MousePostMode::SkyLightPreferred,
+        );
+        Ok(())
+    });
     std::thread::sleep(std::time::Duration::from_millis(28));
-
-    let up = CGEvent::new_mouse_event(source, up_type, point, button)
-        .map_err(|_| anyhow::anyhow!("mouse up failed"))?;
-    set_explicit_flags(&up, flags);
-    post_mouse_event_with_mode(
-        pid,
-        &up,
-        window_local,
-        wid,
-        click_group_id,
-        1,
-        button_number,
-        3,
-        MousePostMode::SkyLightPreferred,
-    );
-
-    Ok(())
+    held.release()
 }
 
 /// Post a mouse event to `pid`.
