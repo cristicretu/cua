@@ -45,6 +45,25 @@ pub fn is_screen_sharing_pid(pid: i32) -> bool {
         .is_some_and(is_screen_sharing_bundle_id)
 }
 
+/// Apps that hand each background key to a simulated device as a HID usage:
+/// Simulator, and Xcode 27's Device Hub, which hosts the same simulators.
+/// Like Screen Sharing they read the virtual keycode and ignore the Unicode
+/// payload, so the ordinary keycode-0 text events all arrive as "a". Unlike
+/// Screen Sharing they accept PID-routed events in the background.
+const KEYCODE_FORWARDER_BUNDLE_IDS: &[&str] =
+    &["com.apple.iphonesimulator", "com.apple.dt.Devices"];
+
+fn is_keycode_forwarder_bundle_id(bundle_id: &str) -> bool {
+    KEYCODE_FORWARDER_BUNDLE_IDS.contains(&bundle_id)
+}
+
+/// Whether background text to `pid` must be sent as physical keycodes.
+pub fn is_keycode_forwarder_pid(pid: i32) -> bool {
+    crate::apps::bundle_id_for_pid(pid)
+        .as_deref()
+        .is_some_and(is_keycode_forwarder_bundle_id)
+}
+
 /// Press and release a single key, delivered to `pid` without stealing focus.
 pub fn press_key(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
     // Handle "+" / "plus" → Shift+= (US keyboard layout).
@@ -105,6 +124,9 @@ fn char_key_events(source: &CGEventSource, ch: char) -> anyhow::Result<(CGEvent,
 
 /// Type a string character-by-character to `pid`.
 pub fn type_text(pid: i32, text: &str) -> anyhow::Result<()> {
+    if is_keycode_forwarder_pid(pid) {
+        return type_text_physical_pid(pid, text, 0);
+    }
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
 
@@ -121,6 +143,9 @@ pub fn type_text(pid: i32, text: &str) -> anyhow::Result<()> {
 /// Type a string character-by-character with an extra `inter_char_delay_ms`
 /// pause after each character (on top of the internal down/up key gap).
 pub fn type_text_with_delay(pid: i32, text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
+    if is_keycode_forwarder_pid(pid) {
+        return type_text_physical_pid(pid, text, inter_char_delay_ms);
+    }
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
 
@@ -406,6 +431,41 @@ pub fn type_text_global(text: &str, inter_char_delay_ms: u64) -> anyhow::Result<
     Ok(())
 }
 
+/// Type ASCII text to `pid` as physical US-keyboard transitions, for a
+/// keycode forwarder (see [`is_keycode_forwarder_pid`]).
+///
+/// Each transition keeps the background PID route and its Shift flag; the
+/// key events also carry the character, so a consumer that does read the
+/// Unicode payload gets the same text.
+fn type_text_physical_pid(pid: i32, text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
+    // Validate the complete payload before posting its first event. A string
+    // containing an unsupported character must fail without partially typing.
+    let event_groups = text
+        .chars()
+        .map(physical_text_events)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for events in event_groups {
+        for event in events {
+            let cg_event = create_bare_keyboard_event(event.key_code, event.key_down)?;
+            cg_event.set_flags(if event.shift {
+                CGEventFlags::CGEventFlagShift
+            } else {
+                CGEventFlags::CGEventFlagNull
+            });
+            if let Some(ch) = event.text.filter(|ch| !ch.is_control()) {
+                cg_event.set_string(&ch.to_string());
+            }
+            post_keyboard_event(pid, &cg_event);
+            key_gap_sleep();
+        }
+        let extra = std::time::Duration::from_millis(inter_char_delay_ms).saturating_sub(key_gap());
+        if !extra.is_zero() {
+            std::thread::sleep(extra);
+        }
+    }
+    Ok(())
+}
+
 /// Type ASCII text through the global HID queue as physical US-keyboard
 /// transitions.
 ///
@@ -540,7 +600,9 @@ enum PhysicalEventType {
 fn physical_text_events(ch: char) -> anyhow::Result<Vec<PhysicalTextEvent>> {
     let (key_code, shift) = physical_key_for_char(ch).ok_or_else(|| {
         anyhow::anyhow!(
-            "Screen Sharing physical text delivery does not support character U+{:04X}",
+            "This app forwards physical keys (Screen Sharing, Simulator, Device Hub), and \
+             character U+{:04X} has no key on the US layout. Nothing was typed; use \
+             set_value on the field instead.",
             ch as u32
         )
     })?;
@@ -1087,5 +1149,13 @@ mod tests {
         assert!(is_screen_sharing_bundle_id("com.apple.ScreenSharing"));
         assert!(!is_screen_sharing_bundle_id("com.apple.screensharing"));
         assert!(!is_screen_sharing_bundle_id("com.microsoft.rdc.macos"));
+    }
+
+    #[test]
+    fn simulator_and_device_hub_forward_keycodes() {
+        assert!(is_keycode_forwarder_bundle_id("com.apple.iphonesimulator"));
+        assert!(is_keycode_forwarder_bundle_id("com.apple.dt.Devices"));
+        assert!(!is_keycode_forwarder_bundle_id("com.apple.dt.Xcode"));
+        assert!(!is_keycode_forwarder_bundle_id("com.apple.ScreenSharing"));
     }
 }
