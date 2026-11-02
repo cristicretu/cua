@@ -33,7 +33,9 @@ fn def() -> &'static ToolDef {
             \n\
             DIFF READS (use them for every re-read after acting): `since:\"latest\"`, or `since:<snapshot_id>` from an earlier read of the same window, returns only what changed: `+` added, `~` changed, `-` removed rows (removed ids are the old snapshot's), a `reindexed:` line if indices shifted, or `no change since …; focused element is …`. The response carries a NEW snapshot_id: use it in tokens. An unknown, expired, other-window or differently-scoped (query/max_elements/max_depth) `since` falls back to a full read; `since_status` says why.\n\
             \n\
-            A new snapshot of the same (pid, window_id) replaces the previous one and stales its tokens (`invalidated_snapshot_ids`). `include_screenshot:false` returns the tree only and keeps the last screenshot's pixel frame while the window keeps its size; `include_accessibility_tree:false` returns only the screenshot and keeps the current snapshot's rows and tokens valid (use it, not `max_elements:1`, when you just need to look); adding `display_only:true` (live previews) also leaves the pixel frame alone. The tree can lie on some surfaces (Electron, Catalyst, virtualized rows with `h:1` frames): cross-check the screenshot, and use pixel x,y at action time only for elements missing from the tree.\n\
+            DENSE WINDOWS: read `skeleton:true` first, then pass a region's token as `root` to read just that subtree. A row whose descendants were not all walked carries `subtree_truncated` (with `children_count` for a depth cut; `{partial}` marks where a budget stopped). `elements_complete:true` means the read saw every element of its scope, so absence is real.\n\
+            \n\
+            A new snapshot of the same (pid, window_id) replaces the previous one and stales its tokens (`invalidated_snapshot_ids`); a `root` drill-down is the exception and leaves them valid (it lives as long as the read it came from). `include_screenshot:false` returns the tree only and keeps the last screenshot's pixel frame while the window keeps its size; `include_accessibility_tree:false` returns only the screenshot and keeps the current snapshot's rows and tokens valid (use it, not `max_elements:1`, when you just need to look); adding `display_only:true` (live previews) also leaves the pixel frame alone. The tree can lie on some surfaces (Electron, Catalyst, virtualized rows with `h:1` frames): cross-check the screenshot, and use pixel x,y at action time only for elements missing from the tree.\n\
             \n\
             Refusals: `window_id_not_found`; `window_owner_pid_mismatch` names the real `owner_pid` (sandboxed Open/Save panels belong to a panel service). `degraded_reason` `ax_window_unresolved` or `ax_app_launching` (the latter with `truncation_reason: app_lookup_timeout`) means an empty tree: re-snapshot, or act with `delivery_mode:\"foreground\"`. `degraded_reason` `screen_locked` means the screen saver, display sleep or a lock hid every window from accessibility: wake and unlock the Mac, then re-snapshot; foreground input would reach the lock screen. `px_frame_mismatch` / `px_capture_unavailable` omit the unprovable screenshot; the AX payload stays valid.".into(),
         input_schema: cua_driver_core::window_state_view::extend_input_schema(serde_json::json!({
@@ -77,6 +79,14 @@ fn def() -> &'static ToolDef {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Cap on walk depth. Default 25."
+                },
+                "skeleton": {
+                    "type": "boolean",
+                    "description": "Default false. A shallow map: depth clamped to 3 (a smaller max_depth wins). Rows whose children were cut show `{+N children}` (`children_count`) and carry an element_token even when not actionable (`drill_only`), for `root`."
+                },
+                "root": {
+                    "type": "string",
+                    "description": "element_token of a row from a current read of this window: returns only that row's subtree as a NEW snapshot without staling the read it came from. Tree only (no screenshot). A stale token is refused with `stale_element_token`."
                 },
                 "timeout_ms": cua_driver_core::tool_schema::timeout_ms_schema(),
                 "max_dimension": {
@@ -236,6 +246,11 @@ impl Tool for GetWindowStateTool {
             Err(refusal) => return refusal,
         };
         let query = args.opt_str("query");
+        let skeleton = args.get("skeleton").and_then(|v| v.as_bool()) == Some(true);
+        let root = match drill_root_arg(&args) {
+            Ok(root) => root,
+            Err(refusal) => return refusal,
+        };
         let screenshot_out_file = args.opt_str("screenshot_out_file").map(|s| {
             // Expand ~ prefix.
             if let Some(relative) = s.strip_prefix("~/") {
@@ -267,7 +282,10 @@ impl Tool for GetWindowStateTool {
         // just re-indexing before an element ax action. `screenshot_out_file`
         // still forces a capture (an explicit "write the frame to disk").
         let include_screenshot = args.get("include_screenshot").and_then(|v| v.as_bool());
-        let should_capture = include_screenshot != Some(false) || screenshot_out_file.is_some();
+        // A `root` drill-down is tree only: its rows are a subtree, and the
+        // window's screenshot frame stays with the read it came from.
+        let should_capture =
+            root.is_none() && (include_screenshot != Some(false) || screenshot_out_file.is_some());
         // `include_accessibility_tree` (default true) is the mirror image of
         // `include_screenshot`: set false to SKIP the AX walk (the expensive
         // part) and return just the screenshot + window metadata — the
@@ -332,18 +350,54 @@ impl Tool for GetWindowStateTool {
             crate::ax::tree::DEFAULT_MAX_ELEMENTS,
             observation_only,
         );
-        let max_depth = args
-            .get("max_depth")
-            .and_then(|v| v.as_u64())
-            .map(|v| v.max(1) as usize)
-            .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH);
+        let max_depth = cua_driver_core::walk_budget::effective_max_depth(
+            args.get("max_depth")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.max(1) as usize)
+                .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH),
+            skeleton,
+        );
         let timeout_ms = cua_driver_core::tool_schema::resolve_timeout_ms(args.get("timeout_ms"));
 
         // A model-facing read lists the menu bar's top-level titles only; a
         // query or full_output walks every menu as before.
         let collapse_menus = query.as_deref().is_none_or(|q| q.trim().is_empty())
             && !view.full_output
-            && !observation_only;
+            && !observation_only
+            && root.is_none();
+        // A drill-down starts from the element its token retained. The store
+        // refuses a stale, malformed or other-window token, and the identity
+        // check a recycled or dead element, before any walk.
+        let (drill, drill_element) = match root.as_deref() {
+            None => (None, None),
+            Some(token) => {
+                let resolved = super::resolve_element(
+                    &self.state,
+                    pid,
+                    &serde_json::json!({ "element_token": token, "window_id": window_id }),
+                )
+                .await;
+                match resolved {
+                    Ok(cua_driver_core::element_token::ResolvedElement::Element {
+                        element_index,
+                        element,
+                        ..
+                    }) => (
+                        Some(DrillRoot {
+                            token: token.to_owned(),
+                            source: cua_driver_core::element_token::parse_token(token)
+                                .map(|(snapshot_id, _)| snapshot_id),
+                            element_index,
+                        }),
+                        Some(element),
+                    ),
+                    Ok(cua_driver_core::element_token::ResolvedElement::None) => {
+                        return stale_root_refusal(token)
+                    }
+                    Err(refusal) => return refusal,
+                }
+            }
+        };
         // Start the screenshot grab before the tree walk so the two overlap:
         // ScreenCaptureKit and the accessibility walk use independent system
         // services, and the read otherwise pays for them one after the other.
@@ -357,24 +411,41 @@ impl Tool for GetWindowStateTool {
             // for an AX call that ignores the per-element messaging timeout
             // (dropping a spawn_blocking JoinHandle cannot cancel it).
             let walk_future = tokio::task::spawn_blocking(move || {
-                let tree = crate::ax::tree::with_menus_collapsed(collapse_menus, || {
-                    crate::ax::tree::walk_tree_budgeted(
-                        pid,
-                        Some(window_id),
-                        q.as_deref(),
-                        max_depth,
-                        cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements),
-                    )
-                });
+                let budget =
+                    cua_driver_core::walk_budget::WalkBudget::new(timeout_ms, max_elements);
+                let tree = match drill_element {
+                    // SAFETY: the retained element stays alive until this
+                    // closure drops it, after the walk.
+                    Some(root) => unsafe {
+                        crate::ax::tree::walk_subtree_budgeted(
+                            root.as_ptr() as crate::ax::bindings::AXUIElementRef,
+                            q.as_deref(),
+                            max_depth,
+                            budget,
+                        )
+                    }?,
+                    None => crate::ax::tree::with_menus_collapsed(collapse_menus, || {
+                        crate::ax::tree::walk_tree_budgeted(
+                            pid,
+                            Some(window_id),
+                            q.as_deref(),
+                            max_depth,
+                            budget,
+                        )
+                    }),
+                };
                 let payload = crate::ax::snapshot::AxSnapshot::from_nodes(&tree.nodes);
-                (tree, payload)
+                Ok((tree, payload))
             });
             // A launching app is waited on for up to `timeout_ms` before the
             // walk's own `timeout_ms` starts (see `ax::launch`).
             let backstop =
                 std::time::Duration::from_millis(timeout_ms) * 2 + AX_WALK_BACKSTOP_GRACE;
             match tokio::time::timeout(backstop, walk_future).await {
-                Ok(Ok((tree, payload))) => (Some(tree), Some(payload)),
+                Ok(Ok(Ok((tree, payload)))) => (Some(tree), Some(payload)),
+                Ok(Ok(Err(crate::ax::tree::SubtreeRootError::Gone))) => {
+                    return stale_root_refusal(root.as_deref().unwrap_or_default())
+                }
                 Ok(Err(e)) => return ToolResult::error(format!("AX tree walk failed: {e}")),
                 Err(_elapsed) => {
                     return ToolResult::error(format!(
@@ -608,18 +679,31 @@ impl Tool for GetWindowStateTool {
             Some(id) => (Some(id), None),
             None => snapshot_payload
                 .filter(|_| scope_matched && !observation_only)
-                .and_then(|payload| {
-                    self.state.snapshots.publish_sized_for_session(
+                .and_then(|payload| match &drill {
+                    Some(drill) => self.state.snapshots.publish_drill_down_for_session(
+                        pid,
+                        u64::from(window_id),
+                        drill.source,
+                        drill.element_index,
+                        payload,
+                        session_id.as_deref(),
+                    ),
+                    None => self.state.snapshots.publish_sized_for_session(
                         pid,
                         u64::from(window_id),
                         payload,
                         session_id.as_deref(),
                         screenshot_resize_scale,
                         window_size,
-                    )
+                    ),
                 })
                 .unzip(),
         };
+        // The root's snapshot was replaced while the subtree was walked: the
+        // drill-down would describe rows of a read the caller no longer holds.
+        if let (Some(drill), None) = (&drill, snapshot_id) {
+            return stale_root_refusal(&drill.token);
+        }
         // The capture registry holds PNG captures only; a JPEG read mints none.
         let capture_id = match (snapshot_id, screenshot.as_ref().filter(|_| !jpeg)) {
             (Some(_), Some((png, _, width, height, native_width, native_height, _, _))) => {
@@ -670,11 +754,18 @@ impl Tool for GetWindowStateTool {
             _ => elements_json,
         };
         let filtered_element_count = elements_json.len();
-        // The structured array intentionally contains only actionable nodes,
-        // and AX child reads can fail independently of the element/depth caps.
-        // Until the walker exposes a proof over the projected search domain,
-        // absence must remain unknown rather than being claimed complete.
-        let elements_complete = false;
+        // A real claim now: the walk visited every node of its scope, no
+        // child list failed to read, no depth clamp cut a row and no menu was
+        // collapsed. An empty tree is degraded and never complete.
+        // A drill-down of a display-only region (text, an image) has rows but
+        // no actionable element; that is an answer, not an empty tree.
+        let observed_rows = match (&drill, tree_result.as_ref()) {
+            (Some(_), Some(r)) => r.nodes.len(),
+            _ => element_count,
+        };
+        let elements_complete = tree_result
+            .as_ref()
+            .is_some_and(|r| r.complete(observed_rows == 0));
 
         let mut structured = serde_json::json!({
             "window_id": window_id,
@@ -692,6 +783,18 @@ impl Tool for GetWindowStateTool {
         });
         if query.is_some() {
             structured["filtered_element_count"] = serde_json::json!(filtered_element_count);
+        }
+        if skeleton {
+            structured["skeleton"] = serde_json::json!(true);
+        }
+        if let Some(drill) = &drill {
+            structured["root"] = serde_json::json!(drill.token);
+            content.push(Content::text(format!(
+                "Drill-down of {}: rows are its subtree, numbered from [0] in this snapshot. \
+                 The read {} came from keeps its element_tokens.",
+                drill.token,
+                drill.token.split(':').next().unwrap_or("it"),
+            )));
         }
         if let Some(r) = tree_result.as_ref() {
             r.walk.apply(&mut structured);
@@ -739,7 +842,7 @@ impl Tool for GetWindowStateTool {
             .is_some_and(|r| r.walk.reason() == Some("app_lookup_timeout"));
         let degradation = degradation_for(
             tree_result.is_some(),
-            element_count,
+            observed_rows,
             window_scope.as_ref(),
             app_lookup_timed_out,
         );
@@ -913,6 +1016,7 @@ impl Tool for GetWindowStateTool {
                             .get("max_depth")
                             .and_then(|v| v.as_u64())
                             .map(|v| v as usize),
+                        scope: view_scope(skeleton, root.as_deref()),
                     },
                     focus_probe: Some(&focus_probe),
                 },
@@ -1225,7 +1329,88 @@ fn element_entry(node: &crate::ax::tree::AXNode, snapshot_id: Option<u32>) -> se
     if let Some(parent) = node.parent_element_index {
         entry["parent_index"] = serde_json::json!(parent);
     }
+    node.subtree.apply(&mut entry);
     entry
+}
+
+/// The row a `root` drill-down starts from.
+struct DrillRoot {
+    /// The token as the caller passed it.
+    token: String,
+    /// The snapshot the token named; `None` for a bare row number, which
+    /// names the window's current snapshot.
+    source: Option<u32>,
+    element_index: usize,
+}
+
+/// Read `root`. A drill-down reads the tree of one subtree, so it refuses
+/// the arguments that ask for something else: a screenshot (whose frame
+/// belongs to the window read) or no tree at all.
+fn drill_root_arg(args: &Value) -> Result<Option<String>, ToolResult> {
+    let root = match args.get("root") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(token)) if token.trim().is_empty() => return Ok(None),
+        Some(Value::String(token)) => token.trim().to_owned(),
+        Some(_) => return Err(invalid_drill_arguments(
+            "root must be an element_token string from a current get_window_state of this window.",
+        )),
+    };
+    let conflict = if args.get("include_screenshot").and_then(Value::as_bool) == Some(true)
+        || args
+            .get("screenshot_out_file")
+            .is_some_and(|v| !v.is_null())
+    {
+        Some("root returns a subtree's tree only; omit include_screenshot / screenshot_out_file, or take the screenshot with a window read.")
+    } else if args
+        .get("include_accessibility_tree")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        Some("root reads a subtree's accessibility tree; it cannot combine with include_accessibility_tree:false.")
+    } else {
+        None
+    };
+    match conflict {
+        Some(detail) => Err(invalid_drill_arguments(detail)),
+        None => Ok(Some(root)),
+    }
+}
+
+fn invalid_drill_arguments(detail: &str) -> ToolResult {
+    ToolResult::error(format!("get_window_state: {detail}")).with_structured(serde_json::json!({
+        "code": "invalid_arguments",
+        "tool": "get_window_state",
+        "detail": detail,
+    }))
+}
+
+/// A `root` whose element is gone, or whose snapshot was replaced during the
+/// walk. Same shape as the snapshot store's stale-token refusal: nothing was
+/// read, and a fresh read gives a current token.
+fn stale_root_refusal(token: &str) -> ToolResult {
+    let message = format!(
+        "{}: root {token} no longer names a live element of a current read. Call \
+         get_window_state (skeleton:true for a map) and pass a token from it.",
+        cua_driver_core::element_token::STALE_TOKEN_ERROR
+    );
+    ToolResult::error(message.clone()).with_structured(serde_json::json!({
+        "status": "refused",
+        "refusal": { "code": "stale_element_token", "message": message },
+        "root": token,
+    }))
+}
+
+/// The `since` view scope beyond query/max_elements/max_depth: a skeleton
+/// read and a drill-down of one root only diff against reads of the same
+/// shape. The root is keyed by its token, which stays the same while the
+/// read it came from is current.
+fn view_scope(skeleton: bool, root: Option<&str>) -> Option<String> {
+    match (skeleton, root) {
+        (false, None) => None,
+        (true, None) => Some("skeleton".to_owned()),
+        (false, Some(root)) => Some(format!("root={root}")),
+        (true, Some(root)) => Some(format!("skeleton root={root}")),
+    }
 }
 
 /// Keep the structured response aligned with a query-filtered markdown tree.
@@ -1673,6 +1858,7 @@ mod tests {
             in_web_content: false,
             subrole: None,
             path: Vec::new(),
+            subtree: Default::default(),
         }
     }
 
@@ -2032,5 +2218,109 @@ mod tests {
             "observation-only entries must not emit unregistered element_token: {}",
             entries[0]
         );
+    }
+}
+
+#[cfg(test)]
+mod drill_down_tests {
+    use super::*;
+    use cua_driver_core::walk_budget::SubtreeMark;
+
+    fn refusal_detail(result: ToolResult) -> Value {
+        assert_eq!(result.is_error, Some(true));
+        result.structured_content.unwrap()
+    }
+
+    #[test]
+    fn root_is_a_tree_only_read_of_one_token() {
+        assert_eq!(drill_root_arg(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            drill_root_arg(&serde_json::json!({ "root": " " })).unwrap(),
+            None
+        );
+        assert_eq!(
+            drill_root_arg(
+                &serde_json::json!({ "root": "s0000002a:3", "include_screenshot": false })
+            )
+            .unwrap()
+            .as_deref(),
+            Some("s0000002a:3")
+        );
+        for args in [
+            serde_json::json!({ "root": 3 }),
+            serde_json::json!({ "root": "s0000002a:3", "include_screenshot": true }),
+            serde_json::json!({ "root": "s0000002a:3", "screenshot_out_file": "/tmp/x.png" }),
+            serde_json::json!({ "root": "s0000002a:3", "include_accessibility_tree": false }),
+        ] {
+            let detail = refusal_detail(drill_root_arg(&args).unwrap_err());
+            assert_eq!(detail["code"], "invalid_arguments", "{args}");
+        }
+    }
+
+    #[test]
+    fn a_dead_root_is_a_stale_token_refusal() {
+        let detail = refusal_detail(stale_root_refusal("s0000002a:3"));
+        assert_eq!(detail["status"], "refused");
+        assert_eq!(detail["refusal"]["code"], "stale_element_token");
+        assert_eq!(detail["root"], "s0000002a:3");
+    }
+
+    #[test]
+    fn view_scope_separates_skeleton_and_drill_down_baselines() {
+        assert_eq!(view_scope(false, None), None);
+        assert_eq!(view_scope(true, None).as_deref(), Some("skeleton"));
+        assert_eq!(
+            view_scope(false, Some("s0000002a:3")).as_deref(),
+            Some("root=s0000002a:3")
+        );
+        assert_eq!(
+            view_scope(true, Some("s0000002a:3")).as_deref(),
+            Some("skeleton root=s0000002a:3")
+        );
+    }
+
+    #[test]
+    fn cut_rows_carry_their_subtree_mark() {
+        let mut node = crate::ax::tree::AXNode {
+            element_index: Some(4),
+            role: "AXOutline".into(),
+            title: None,
+            value: None,
+            description: None,
+            identifier: None,
+            help: None,
+            actions: vec![],
+            element_ptr: 0,
+            depth: 3,
+            parent_element_index: Some(0),
+            frame: None,
+            value_state: None,
+            value_description: None,
+            min_value: None,
+            max_value: None,
+            enabled: None,
+            selected: None,
+            in_web_content: false,
+            subrole: None,
+            path: Vec::new(),
+            subtree: SubtreeMark {
+                drill_anchor: true,
+                ..SubtreeMark::from_children(
+                    cua_driver_core::walk_budget::Observed::Complete,
+                    Some(9),
+                )
+            },
+        };
+        let entry = element_entry(&node, Some(0x2a));
+        assert_eq!(entry["element_token"], "s0000002a:4");
+        assert_eq!(entry["subtree_truncated"], true);
+        assert_eq!(entry["children_count"], 9);
+        assert_eq!(entry["drill_only"], true);
+
+        node.subtree = SubtreeMark::default();
+        let entry = element_entry(&node, Some(0x2a));
+        for key in ["subtree_truncated", "children_count", "drill_only"] {
+            assert!(entry.get(key).is_none(), "{key} only on cut rows");
+        }
     }
 }

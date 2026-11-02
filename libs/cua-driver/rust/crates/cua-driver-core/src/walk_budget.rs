@@ -229,6 +229,145 @@ pub fn truncation_note(
     )
 }
 
+/// Depth clamp of a skeleton read (`skeleton:true`): rows at rendered depth 0
+/// to 3, deep enough to name a window's regions (toolbar, sidebar, list,
+/// web area) and shallow enough to stay small on dense apps. The value and
+/// the progressive skeleton-then-`root` workflow follow agent-desktop's
+/// `snapshot --skeleton` (Apache-2.0, crates/core/src/commands/snapshot.rs).
+pub const SKELETON_MAX_DEPTH: usize = 3;
+
+/// The walk depth a read uses: a skeleton read clamps the caller's
+/// `max_depth` to [`SKELETON_MAX_DEPTH`]; an explicit smaller value wins.
+pub fn effective_max_depth(max_depth: usize, skeleton: bool) -> usize {
+    if skeleton {
+        max_depth.min(SKELETON_MAX_DEPTH)
+    } else {
+        max_depth
+    }
+}
+
+/// Whether a row at `depth` with `child_count` children has those children
+/// cut by the depth clamp. The children sit at `depth + 1`.
+pub fn depth_cut(depth: usize, max_depth: usize, child_count: usize) -> bool {
+    child_count > 0 && depth + 1 > max_depth
+}
+
+/// Whether a row gets an element index only so it can be a `root` drill
+/// target: it is not addressable itself, but the depth clamp hid its
+/// children, and drilling into it is how a caller reaches them. Mirrors
+/// agent-desktop's skeleton anchors (crates/core/src/refs/ref_alloc.rs), which
+/// are planned only where a depth clamp left a `children_count`.
+pub fn is_drill_anchor(actionable: bool, depth_cut: bool) -> bool {
+    !actionable && depth_cut
+}
+
+/// How much of one subtree a walk observed. Ordered: merging keeps the worst.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Observed {
+    /// Every descendant was visited (or deliberately collapsed).
+    #[default]
+    Complete,
+    /// The node was visited, but something below it was not.
+    Partial,
+    /// The node itself was not visited (node or time budget, or depth
+    /// clamp), or its children could not be read. A rendered parent that
+    /// receives this from a direct child is where the cut happened.
+    Skipped,
+}
+
+impl Observed {
+    pub fn merge(self, other: Observed) -> Observed {
+        self.max(other)
+    }
+}
+
+/// Per-row completeness, recorded on the walked node. Completeness is
+/// reported on each row whose descendants were cut, so a reader can walk from
+/// the root to the boundary (agent-desktop CONCEPTS.md, "Partial
+/// Observation"): a depth clamp knows how many children it skipped, while a
+/// budget stop cannot afford the count and marks the row without one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubtreeMark {
+    /// Some descendant of this row was not observed.
+    pub truncated: bool,
+    /// The cut is at this row's own children (not further down), so this
+    /// is the row to drill into or to re-read with a larger budget.
+    pub cut_here: bool,
+    /// Children hidden by the depth clamp. `None` for a budget stop.
+    pub children_count: Option<usize>,
+    /// The row is indexed only as a drill target (see [`is_drill_anchor`]).
+    pub drill_anchor: bool,
+}
+
+impl SubtreeMark {
+    /// Mark for a row from what its children reported. `children` is the
+    /// merge of every direct child's [`Observed`] (`Skipped` also when the
+    /// child list itself could not be read); `children_count` is the depth
+    /// clamp's count when the clamp cut this row's children.
+    pub fn from_children(children: Observed, children_count: Option<usize>) -> Self {
+        Self {
+            truncated: children_count.is_some() || children != Observed::Complete,
+            cut_here: children_count.is_some() || children == Observed::Skipped,
+            children_count,
+            drill_anchor: false,
+        }
+    }
+
+    /// The marker appended to the row's markdown, only where the cut is:
+    /// `{+N children}` for a depth clamp, `{partial}` for a budget stop or an
+    /// unreadable child list. Ancestors of a cut carry the structured
+    /// `subtree_truncated` only, so a skeleton read is not noise on every row.
+    pub fn row_suffix(&self) -> Option<String> {
+        match (self.cut_here, self.children_count) {
+            (_, Some(1)) => Some(" {+1 child}".to_owned()),
+            (_, Some(n)) => Some(format!(" {{+{n} children}}")),
+            (true, None) => Some(" {partial}".to_owned()),
+            (false, None) => None,
+        }
+    }
+
+    /// Write the mark into a structured `elements` entry.
+    pub fn apply(&self, entry: &mut Value) {
+        if self.truncated {
+            entry["subtree_truncated"] = json!(true);
+        }
+        if let Some(count) = self.children_count {
+            entry["children_count"] = json!(count);
+        }
+        if self.drill_anchor {
+            entry["drill_only"] = json!(true);
+        }
+    }
+}
+
+/// The facts behind `elements_complete`, the claim that a read observed
+/// every element in its scope, so that absence from it is evidence of
+/// absence (verify_state uses it to prove an element is gone).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompletenessFacts {
+    /// The walk ran out of nodes or time.
+    pub walk_truncated: bool,
+    /// Merge of every top-level subtree's [`Observed`]: depth clamps and
+    /// unreadable child lists make it incomplete.
+    pub subtrees: Observed,
+    /// The requested window resolved to an AX surface.
+    pub scope_matched: bool,
+    /// Closed menu-bar menus were listed by title only.
+    pub menus_collapsed: bool,
+    /// The read was degraded (empty or unresolved tree).
+    pub degraded: bool,
+}
+
+/// Whether `elements_complete` may be claimed. Every unknown fails closed:
+/// a single unread child list keeps negative existence unknown.
+pub fn elements_complete(facts: CompletenessFacts) -> bool {
+    !facts.walk_truncated
+        && facts.subtrees == Observed::Complete
+        && facts.scope_matched
+        && !facts.menus_collapsed
+        && !facts.degraded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +475,116 @@ mod tests {
         assert!(note.contains("still be launching"));
         let note = truncation_note(Some("huge_container"), 1000, 1918, 0);
         assert!(note.contains("not expanded"));
+    }
+
+    #[test]
+    fn skeleton_clamps_depth_and_an_explicit_smaller_depth_wins() {
+        assert_eq!(effective_max_depth(25, true), SKELETON_MAX_DEPTH);
+        assert_eq!(effective_max_depth(2, true), 2);
+        assert_eq!(effective_max_depth(25, false), 25);
+    }
+
+    #[test]
+    fn depth_cut_needs_children_past_the_clamp() {
+        assert!(depth_cut(3, 3, 4));
+        assert!(!depth_cut(2, 3, 4), "children at depth 3 are still walked");
+        assert!(!depth_cut(3, 3, 0), "a leaf has nothing to cut");
+        assert!(is_drill_anchor(false, true));
+        assert!(
+            !is_drill_anchor(true, true),
+            "an addressable row has its own index"
+        );
+        assert!(!is_drill_anchor(false, false));
+    }
+
+    #[test]
+    fn observed_merges_to_the_worst() {
+        use Observed::*;
+        assert_eq!(Complete.merge(Partial), Partial);
+        assert_eq!(Partial.merge(Skipped), Skipped);
+        assert_eq!(Complete.merge(Complete), Complete);
+    }
+
+    #[test]
+    fn marks_put_the_marker_only_where_the_cut_is() {
+        let clamp = SubtreeMark::from_children(Observed::Complete, Some(12));
+        assert!(clamp.truncated && clamp.cut_here);
+        assert_eq!(clamp.row_suffix().as_deref(), Some(" {+12 children}"));
+        assert_eq!(
+            SubtreeMark::from_children(Observed::Complete, Some(1))
+                .row_suffix()
+                .as_deref(),
+            Some(" {+1 child}")
+        );
+
+        let budget = SubtreeMark::from_children(Observed::Skipped, None);
+        assert!(budget.truncated && budget.cut_here);
+        assert_eq!(budget.row_suffix().as_deref(), Some(" {partial}"));
+
+        let ancestor = SubtreeMark::from_children(Observed::Partial, None);
+        assert!(ancestor.truncated && !ancestor.cut_here);
+        assert_eq!(
+            ancestor.row_suffix(),
+            None,
+            "ancestors stay unmarked in markdown"
+        );
+
+        let whole = SubtreeMark::from_children(Observed::Complete, None);
+        assert_eq!(whole, SubtreeMark::default());
+        assert_eq!(whole.row_suffix(), None);
+
+        let mut entry = json!({});
+        SubtreeMark {
+            drill_anchor: true,
+            ..clamp
+        }
+        .apply(&mut entry);
+        assert_eq!(
+            entry,
+            json!({"subtree_truncated": true, "children_count": 12, "drill_only": true})
+        );
+        let mut entry = json!({});
+        whole.apply(&mut entry);
+        assert_eq!(entry, json!({}));
+    }
+
+    #[test]
+    fn elements_complete_fails_closed_on_every_gap() {
+        let complete = CompletenessFacts {
+            walk_truncated: false,
+            subtrees: Observed::Complete,
+            scope_matched: true,
+            menus_collapsed: false,
+            degraded: false,
+        };
+        assert!(elements_complete(complete));
+        for facts in [
+            CompletenessFacts {
+                walk_truncated: true,
+                ..complete
+            },
+            CompletenessFacts {
+                subtrees: Observed::Partial,
+                ..complete
+            },
+            CompletenessFacts {
+                subtrees: Observed::Skipped,
+                ..complete
+            },
+            CompletenessFacts {
+                scope_matched: false,
+                ..complete
+            },
+            CompletenessFacts {
+                menus_collapsed: true,
+                ..complete
+            },
+            CompletenessFacts {
+                degraded: true,
+                ..complete
+            },
+        ] {
+            assert!(!elements_complete(facts), "{facts:?}");
+        }
     }
 }

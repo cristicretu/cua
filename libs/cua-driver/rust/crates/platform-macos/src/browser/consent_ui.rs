@@ -419,6 +419,7 @@ mod tests {
             in_web_content: false,
             subrole: None,
             path: Vec::new(),
+            subtree: Default::default(),
         }
     }
 
@@ -639,6 +640,8 @@ mod tests {
                     truncated: false,
                     walk: budget.outcome(),
                     window_scope: None,
+                    observed: Default::default(),
+                    menus_collapsed: false,
                 })?;
             }
             Ok::<_, BrowserRefusal>(())

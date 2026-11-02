@@ -1864,6 +1864,7 @@ impl Tool for GetWindowStateTool {
                                 query: query.clone(),
                                 max_elements: max_elements.unwrap_or(LINUX_DEFAULT_MAX_ELEMENTS),
                                 max_depth,
+                                scope: None,
                             },
                             focus_probe: None,
                         },

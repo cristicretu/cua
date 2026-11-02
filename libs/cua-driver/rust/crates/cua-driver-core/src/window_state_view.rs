@@ -253,6 +253,10 @@ pub struct ViewKey {
     pub query: Option<String>,
     pub max_elements: usize,
     pub max_depth: Option<usize>,
+    /// Backend-specific shape of the walk beyond the shared caps, e.g. a
+    /// macOS skeleton read or a `root` drill-down (`None` for a plain window
+    /// read). Reads of different scopes never diff against each other.
+    pub scope: Option<String>,
 }
 
 pub struct ViewContext<'a> {
@@ -481,7 +485,9 @@ fn fallback_text(reason: &str) -> &'static str {
     match reason {
         "unknown_snapshot" => "unknown or expired snapshot_id",
         "other_window" => "that snapshot belongs to a different window",
-        "view_changed" => "query, max_elements or max_depth differ from that snapshot's read",
+        "view_changed" => {
+            "query, max_elements, max_depth, skeleton or root differ from that snapshot's read"
+        }
         "too_much_changed" => "most of the tree changed",
         "diff_too_large" => "the trees are too large to compare",
         "no_snapshot" => "this read produced no snapshot to compare against",
@@ -766,6 +772,7 @@ pub(crate) fn remember_for_test(snapshot_id: &str, pid: i64, window_id: u64, mar
             query: None,
             max_elements: DEFAULT_MAX_ELEMENTS,
             max_depth: None,
+            scope: None,
         },
         focus_probe: None,
     };
@@ -1268,6 +1275,7 @@ mod tests {
                 query: None,
                 max_elements: 250,
                 max_depth: None,
+                scope: None,
             },
             focus_probe: None,
         }
@@ -1413,6 +1421,66 @@ mod tests {
         assert!(s.get("tree_markdown").is_none());
         assert_eq!(s["elements"].as_array().unwrap().len(), 2);
         assert!(!text_of(&content).contains("AXButton"));
+    }
+
+    #[test]
+    fn skeleton_and_drill_down_reads_diff_only_against_their_own_scope() {
+        let window = 7041;
+        let scoped = |scope: Option<&str>| ViewContext {
+            key: ViewKey {
+                scope: scope.map(str::to_owned),
+                ..ctx(window).key
+            },
+            ..ctx(window)
+        };
+        let skeleton = "- [0] AXWindow \"Doc\"\n  - [1] AXOutline {+3 children}\n  - [2] AXButton \"Save\" [actions=[press]]\n";
+        let (mut c1, mut s1) = payload("s000000c1", skeleton);
+        apply(
+            &opts(json!({})),
+            &scoped(Some("skeleton")),
+            &mut c1,
+            &mut s1,
+        );
+
+        // A full read of the same window is a different view.
+        let (mut c2, mut s2) = payload("s000000c2", OLD);
+        apply(
+            &opts(json!({"since": "s000000c1"})),
+            &ctx(window),
+            &mut c2,
+            &mut s2,
+        );
+        assert_eq!(s2["since_status"], "view_changed");
+        assert!(text_of(&c2).contains("skeleton or root differ"));
+
+        // The next skeleton read diffs, and a grown cut is a changed row.
+        let grown = skeleton.replace("{+3 children}", "{+4 children}");
+        let (mut c3, mut s3) = payload("s000000c3", &grown);
+        apply(
+            &opts(json!({"since": "latest"})),
+            &scoped(Some("skeleton")),
+            &mut c3,
+            &mut s3,
+        );
+        assert_eq!(s3["since"], "s000000c1");
+        assert_eq!(s3["since_status"], "diff");
+        assert_eq!(s3["diff_counts"]["changed"], 1);
+        assert!(text_of(&c3).contains("~ [1] AXOutline {+4 children}"));
+
+        // A drill-down of one root diffs against the last read of that root.
+        let root = Some("root=s000000c3:1");
+        let drill = "- [0] AXRow \"a\" [actions=[select]]\n- [1] AXRow \"b\" [actions=[select]]\n";
+        let (mut c4, mut s4) = payload("s000000c4", drill);
+        apply(&opts(json!({})), &scoped(root), &mut c4, &mut s4);
+        let (mut c5, mut s5) = payload("s000000c5", drill);
+        apply(
+            &opts(json!({"since": "latest"})),
+            &scoped(root),
+            &mut c5,
+            &mut s5,
+        );
+        assert_eq!(s5["since"], "s000000c4");
+        assert_eq!(s5["since_status"], "no_change");
     }
 
     #[test]

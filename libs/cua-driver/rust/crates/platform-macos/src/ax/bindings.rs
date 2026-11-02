@@ -640,20 +640,40 @@ pub fn focused_element_window_id_of_pid(pid: i32) -> Option<u32> {
 ///
 /// `element` must be valid, and the caller must release every returned element.
 pub unsafe fn copy_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
+    copy_children_checked(element).0
+}
+
+/// [`copy_children`] that also says whether the read is an answer: `false`
+/// when the child list could not be read (a messaging timeout, a dead
+/// element, `kAXErrorCannotComplete`), as opposed to an element that has no
+/// children (`kAXErrorNoValue` / `kAXErrorAttributeUnsupported`). The tree
+/// walk uses it so an unread child list keeps `elements_complete` false.
+///
+/// # Safety
+///
+/// `element` must be valid, and the caller must release every returned element.
+pub unsafe fn copy_children_checked(element: AXUIElementRef) -> (Vec<AXUIElementRef>, bool) {
     let attr = CFStr::new("AXChildren");
     let mut value: CFTypeRef = std::ptr::null();
     let err = AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef(), &mut value);
     if err != kAXErrorSuccess || value.is_null() {
-        return vec![];
+        if !value.is_null() {
+            CFRelease(value);
+        }
+        let answered = matches!(
+            err,
+            kAXErrorSuccess | kAXErrorNoValue | kAXErrorAttributeUnsupported
+        );
+        return (vec![], answered);
     }
     let cf_array_type_id = CFArray::<CFTypeRef>::type_id();
     if core_foundation::base::CFGetTypeID(value) != cf_array_type_id {
         CFRelease(value);
-        return vec![];
+        return (vec![], false);
     }
     let arr = CFArray::<CFTypeRef>::wrap_under_create_rule(value as _);
     let ax_type_id = AXUIElementGetTypeID();
-    (0..arr.len())
+    let children = (0..arr.len())
         .filter_map(|i| {
             let item = *arr.get(i)?;
             if core_foundation::base::CFGetTypeID(item) == ax_type_id {
@@ -664,7 +684,8 @@ pub unsafe fn copy_children(element: AXUIElementRef) -> Vec<AXUIElementRef> {
                 None
             }
         })
-        .collect()
+        .collect();
+    (children, true)
 }
 
 /// Copy an AX element-valued attribute. The returned element is retained and
