@@ -35,6 +35,7 @@ fn def() -> &'static ToolDef {
                 "delay_ms":      { "type": "integer", "description": "Milliseconds between characters (default 30)." },
                 "window_id":     { "type": "integer", "description": "Window ID for element focus. Optional when element_token is supplied." },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "timeout_ms": cua_driver_core::tool_schema::actionability_timeout_schema(),
                 "type_chars_only": { "type": "boolean", "description": "Skip AX focus, type directly. Default false." }
             },
             "additionalProperties": false
@@ -68,7 +69,7 @@ impl Tool for TypeTextCharsTool {
             .into_owned();
         let delay_ms = args.u64_or("delay_ms", 30);
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match super::resolve_element(&self.state, pid, &args).await {
+        let (resolved, mut target) = match super::resolve_target(&self.state, pid, &args).await {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -81,22 +82,55 @@ impl Tool for TypeTextCharsTool {
 
         let element_ptr: Option<usize> = element_guard.as_ref().map(|g| g.as_ptr());
 
+        // Actionability, as type_text: wait (no lease) for a token-addressed
+        // field to take text, then re-check under the lease below.
+        let mut actionability = match target.as_mut() {
+            Some(target) => {
+                let kind = cua_driver_core::actionability::ActionKind::TypeText;
+                let timeout = match cua_driver_core::actionability::timeout_from_args(
+                    &args,
+                    kind,
+                    text.chars().count(),
+                ) {
+                    Ok(timeout) => timeout,
+                    Err(error) => return error,
+                };
+                let mut waiter = target.waiter(
+                    cua_driver_core::actionability::ActionRequest::semantic(kind),
+                    timeout,
+                );
+                if let Err(refusal) = target.await_actionable(&mut waiter).await {
+                    return refusal;
+                }
+                Some((target, waiter))
+            }
+            None => None,
+        };
+
         // ── Exact-target background gate (macOS background input v1) ──
         // This tool is always background CGEvent keystrokes — process-scoped
         // transport with no semantic AX rung. A window-addressed request must
         // prove exact delivery before any event is posted; there is no
         // semantic fallback here, so a refusal is final.
         let _mutation_lease = if let Some(wid) = window_id {
-            match super::gate_background_window_action(
-                pid,
-                wid,
-                element_ptr,
-                super::window_keyboard_action(
-                    cua_driver_core::background_input::BackgroundAction::InsertText,
-                ),
-            )
-            .await
-            {
+            let action = super::window_keyboard_action(
+                cua_driver_core::background_input::BackgroundAction::InsertText,
+            );
+            let gated = match actionability.as_mut() {
+                Some((target, waiter)) => {
+                    super::gate_actionable_window_action(
+                        target,
+                        waiter,
+                        pid,
+                        wid,
+                        element_ptr,
+                        action,
+                    )
+                    .await
+                }
+                None => super::gate_background_window_action(pid, wid, element_ptr, action).await,
+            };
+            match gated {
                 Ok(lease) => Some(lease),
                 Err(refusal_result) => return refusal_result,
             }

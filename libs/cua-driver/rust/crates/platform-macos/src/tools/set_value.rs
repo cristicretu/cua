@@ -59,6 +59,7 @@ fn def() -> &'static ToolDef {
                     "description": "Window ID. Omit with element_token."
                 },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "timeout_ms": cua_driver_core::tool_schema::actionability_timeout_schema(),
                 "value": {
                     "type": "string",
                     "description": "New value, coerced to the element's type."
@@ -95,19 +96,22 @@ impl Tool for SetValueTool {
             Err(e) => return e,
         };
 
-        let (element_index, window_id, element_guard) =
-            match super::resolve_element(&self.state, pid, &args).await {
-                Ok(cua_driver_core::element_token::ResolvedElement::None) => {
+        let (element_index, window_id, element_guard, mut target) =
+            match super::resolve_target(&self.state, pid, &args).await {
+                Ok((cua_driver_core::element_token::ResolvedElement::None, _)) | Ok((_, None)) => {
                     return ToolResult::error(
                         "set_value requires element_token to address the target element.",
                     )
                 }
-                Ok(cua_driver_core::element_token::ResolvedElement::Element {
-                    window_id,
-                    element_index,
-                    element,
-                }) => match u32::try_from(window_id) {
-                    Ok(window_id) => (element_index, window_id, element),
+                Ok((
+                    cua_driver_core::element_token::ResolvedElement::Element {
+                        window_id,
+                        element_index,
+                        element,
+                    },
+                    Some(target),
+                )) => match u32::try_from(window_id) {
+                    Ok(window_id) => (element_index, window_id, element, target),
                     Err(_) => return ToolResult::error("window_id is out of range for macOS."),
                 },
                 Err(refusal) => return refusal,
@@ -115,11 +119,29 @@ impl Tool for SetValueTool {
 
         let element_ptr = element_guard.as_ptr();
 
+        // Actionability: a disabled or zero-size field is waited for; a
+        // control that cannot hold a value is refused at once. Waits hold no
+        // lease; the re-check runs under it.
+        let kind = cua_driver_core::actionability::ActionKind::SetValue;
+        let timeout = match cua_driver_core::actionability::timeout_from_args(&args, kind, 0) {
+            Ok(timeout) => timeout,
+            Err(error) => return error,
+        };
+        let mut waiter = target.waiter(
+            cua_driver_core::actionability::ActionRequest::semantic(kind),
+            timeout,
+        );
+        if let Err(refusal) = target.await_actionable(&mut waiter).await {
+            return refusal;
+        }
+
         // set_value is an always-background semantic AX mutation. Re-prove
         // that the retained element still belongs to the requested exact
         // window immediately before any cursor or AX work; a cache hit alone
         // is not delivery proof after a window lifecycle or Space change.
-        let _mutation_lease = match super::gate_background_window_action(
+        let _mutation_lease = match super::gate_actionable_window_action(
+            &mut target,
+            &mut waiter,
             pid,
             window_id,
             Some(element_ptr),

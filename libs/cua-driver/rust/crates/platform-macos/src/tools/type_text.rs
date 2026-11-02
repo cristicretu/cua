@@ -72,6 +72,7 @@ fn def() -> &'static ToolDef {
                     "description": "Window ID. Omit with element_token."
                 },
                 "element_token": cua_driver_core::tool_schema::element_token_schema(),
+                "timeout_ms": cua_driver_core::tool_schema::actionability_timeout_schema(),
                 "x": { "type": "number", "description": "Screenshot-pixel X of the field (get_window_state PNG, as in click). With y and no element_token, pixel-clicks to focus, then types." },
                 "y": { "type": "number", "description": "Screenshot-pixel Y (see x)." },
                 "delay_ms": {
@@ -184,7 +185,7 @@ impl Tool for TypeTextTool {
         let text = cua_driver_core::text_sanitize::strip_trailing_agent_protocol_tags(&text_raw)
             .into_owned();
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match super::resolve_element(&self.state, pid, &args).await {
+        let (resolved, mut target) = match super::resolve_target(&self.state, pid, &args).await {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -216,6 +217,35 @@ impl Tool for TypeTextTool {
 
         let element_guard = element_guard.zip(element_index);
 
+        // ── Actionability (wait without the lease) ──
+        // A token-addressed field that is disabled or still zero-size is
+        // polled until it can take text (5000 ms + 30 ms per character by
+        // default); a control keys can never edit is refused at once. The
+        // re-check runs under the lease below.
+        let mut actionability = match target.as_mut() {
+            Some(target) => {
+                let kind = cua_driver_core::actionability::ActionKind::TypeText;
+                let timeout = match cua_driver_core::actionability::timeout_from_args(
+                    &args,
+                    kind,
+                    text.chars().count(),
+                ) {
+                    Ok(timeout) => timeout,
+                    Err(error) => return error,
+                };
+                let mut waiter = target.waiter(
+                    cua_driver_core::actionability::ActionRequest::semantic(kind)
+                        .foreground(delivery_mode.is_foreground()),
+                    timeout,
+                );
+                if let Err(refusal) = target.await_actionable(&mut waiter).await {
+                    return refusal;
+                }
+                Some((target, waiter))
+            }
+            None => None,
+        };
+
         // ── Exact-target background gate (macOS background input v1) ──
         // A window-addressed background insert must prove exact delivery
         // before any input — including the px focus click — is sent. The pure
@@ -226,10 +256,30 @@ impl Tool for TypeTextTool {
         let (_mutation_lease, keyboard_policy) = match window_id {
             Some(wid) if !delivery_mode.is_foreground() => {
                 let gate_element_ptr = element_guard.as_ref().map(|(g, _)| g.as_ptr());
-                match background_keyboard_policy(pid, wid, gate_element_ptr).await {
-                    Ok((lease, policy)) => (Some(lease), policy),
-                    Err(refusal_result) => return refusal_result,
-                }
+                let (gated, queued) =
+                    match background_keyboard_policy_noting_queue(pid, wid, gate_element_ptr).await
+                    {
+                        Ok(gated) => gated,
+                        Err(refusal_result) => return refusal_result,
+                    };
+                let gated = match actionability.as_mut() {
+                    Some((target, waiter))
+                        if waiter.needs_recheck(queued, std::time::Instant::now()) =>
+                    {
+                        match target
+                            .hold_actionable(waiter, gated, || {
+                                background_keyboard_policy(pid, wid, gate_element_ptr)
+                            })
+                            .await
+                        {
+                            Ok(gated) => gated,
+                            Err(refusal) => return refusal,
+                        }
+                    }
+                    _ => gated,
+                };
+                let (lease, policy) = gated;
+                (Some(lease), policy)
             }
             _ => (None, BackgroundKeyboardPolicy::Allowed),
         };
@@ -849,10 +899,29 @@ async fn background_keyboard_policy(
     window_id: u32,
     element_ptr: Option<usize>,
 ) -> Result<(super::BackgroundMutationLease, BackgroundKeyboardPolicy), ToolResult> {
+    background_keyboard_policy_noting_queue(pid, window_id, element_ptr)
+        .await
+        .map(|(gated, _)| gated)
+}
+
+/// [`background_keyboard_policy`], also reporting whether the lease was
+/// taken only after queuing behind another mutation of the app (the
+/// actionability re-check must then run; see `Waiter::needs_recheck`).
+async fn background_keyboard_policy_noting_queue(
+    pid: i32,
+    window_id: u32,
+    element_ptr: Option<usize>,
+) -> Result<
+    (
+        (super::BackgroundMutationLease, BackgroundKeyboardPolicy),
+        bool,
+    ),
+    ToolResult,
+> {
     use cua_driver_core::background_input::{
         decide_background_input, BackgroundAction, BackgroundInputDecision, ExactWindowTarget,
     };
-    let lease = super::acquire_background_mutation(pid).await;
+    let (lease, queued) = super::acquire_background_mutation_noting_queue(pid).await;
     let element_guard =
         element_ptr.map(|ptr| unsafe { crate::ax::snapshot::RetainedElement::retain(ptr) });
     let facts = match tokio::task::spawn_blocking(move || {
@@ -873,13 +942,18 @@ async fn background_keyboard_policy(
     // `super::post_keys_to_window`), so a sibling window is not ambiguous.
     let action = super::window_keyboard_action(BackgroundAction::InsertText);
     match decide_background_input(target, &facts, action) {
-        BackgroundInputDecision::Execute { .. } => Ok((lease, BackgroundKeyboardPolicy::Allowed)),
+        BackgroundInputDecision::Execute { .. } => {
+            Ok(((lease, BackgroundKeyboardPolicy::Allowed), queued))
+        }
         BackgroundInputDecision::Refuse(refusal) => {
             let semantic_available = element_ptr.is_some()
                 && decide_background_input(target, &facts, BackgroundAction::AxSemantic)
                     .is_execute();
             if semantic_available {
-                Ok((lease, BackgroundKeyboardPolicy::SemanticOnly(refusal)))
+                Ok((
+                    (lease, BackgroundKeyboardPolicy::SemanticOnly(refusal)),
+                    queued,
+                ))
             } else {
                 Err(super::background_refusal_result(pid, window_id, &refusal))
             }

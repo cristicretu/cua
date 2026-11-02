@@ -349,12 +349,232 @@ pub(crate) async fn resolve_element(
     cua_driver_core::element_token::ResolvedElement<crate::ax::snapshot::RetainedElement>,
     cua_driver_core::protocol::ToolResult,
 > {
+    resolve_target(state, pid, args)
+        .await
+        .map(|(resolved, _)| resolved)
+}
+
+/// [`resolve_element`], keeping what an actionability gate needs: the
+/// retained element, its recorded identity and the live facts the identity
+/// check just read, so the gate's first observation costs no AX call.
+/// `None` for a call with no `element_token`.
+pub(crate) async fn resolve_target(
+    state: &ToolState,
+    pid: i32,
+    args: &serde_json::Value,
+) -> Result<
+    (
+        cua_driver_core::element_token::ResolvedElement<crate::ax::snapshot::RetainedElement>,
+        Option<ActionTarget>,
+    ),
+    cua_driver_core::protocol::ToolResult,
+> {
     use cua_driver_core::element_token::ResolvedElement;
     let (resolved, identity) = state.snapshots.resolve_identified(pid, args)?;
-    if let (ResolvedElement::Element { element, .. }, Some(identity)) = (&resolved, identity) {
-        confirm_element_identity(element, identity, args["element_token"].as_str()).await?;
+    let token = args["element_token"].as_str();
+    let target = match &resolved {
+        ResolvedElement::Element {
+            element, window_id, ..
+        } => {
+            let pending = match identity.clone() {
+                Some(identity) => Some(confirm_element_identity(element, identity, token).await?),
+                None => None,
+            };
+            Some(ActionTarget {
+                element: element.clone(),
+                identity: identity.unwrap_or_default(),
+                window_id: u32::try_from(*window_id).ok(),
+                token: token.map(str::to_owned),
+                pending,
+                window_frame: None,
+            })
+        }
+        ResolvedElement::None => None,
+    };
+    Ok((resolved, target))
+}
+
+/// A resolved, identity-confirmed element-token target, ready for the
+/// actionability gate (`cua_driver_core::actionability`).
+///
+/// A token-addressed action calls [`ActionTarget::await_actionable`] before
+/// acquiring its mutation lease (waiting never holds the lease), then
+/// [`ActionTarget::hold_actionable`] once it holds the lease, which re-checks
+/// identity and actionability right before dispatch and, when the element
+/// changed in between, drops the lease, waits again and re-acquires it. Both
+/// share one [`Waiter`](cua_driver_core::actionability::Waiter), so the whole
+/// action has one deadline. For a new token tool:
+///
+/// ```ignore
+/// let (resolved, target) = super::resolve_target(&self.state, pid, &args).await?;
+/// let mut waiter = target.waiter(ActionRequest::semantic(ActionKind::Expand), timeout);
+/// target.await_actionable(&mut waiter).await?;
+/// let lease = target.hold_actionable(&mut waiter, lease, || reacquire()).await?;
+/// ```
+pub(crate) struct ActionTarget {
+    element: crate::ax::snapshot::RetainedElement,
+    identity: cua_driver_core::ref_identity::RefIdentity,
+    window_id: Option<u32>,
+    token: Option<String>,
+    /// The identity check's live facts, used once by the first observation.
+    pending: Option<cua_driver_core::ref_identity::LiveElementFacts>,
+    /// The window frame, once a pointer-delivery observation has read it.
+    window_frame: Option<cua_driver_core::ref_identity::Field<[f64; 4]>>,
+}
+
+impl ActionTarget {
+    /// A waiter for `request` with `timeout`, comparing stability against the
+    /// frame the snapshot recorded.
+    pub(crate) fn waiter(
+        &self,
+        request: cua_driver_core::actionability::ActionRequest,
+        timeout: std::time::Duration,
+    ) -> cua_driver_core::actionability::Waiter {
+        cua_driver_core::actionability::Waiter::new(
+            request,
+            timeout,
+            self.identity.frame,
+            self.token.as_deref(),
+            std::time::Instant::now(),
+        )
     }
-    Ok(resolved)
+
+    /// Poll until the element is actionable for the waiter's request, a
+    /// terminal check fails, the element goes stale, or the deadline passes.
+    /// Call it holding no mutation lease. An already-actionable element
+    /// returns on the first observation, which reuses the identity read.
+    pub(crate) async fn await_actionable(
+        &mut self,
+        waiter: &mut cua_driver_core::actionability::Waiter,
+    ) -> Result<(), cua_driver_core::protocol::ToolResult> {
+        use cua_driver_core::actionability::Step;
+        loop {
+            let facts = self.observe(waiter.request()).await?;
+            match waiter.observe(&facts, std::time::Instant::now()) {
+                Step::Act => return Ok(()),
+                Step::Sleep(interval) => tokio::time::sleep(interval).await,
+                Step::Refuse(refusal) => return Err(*refusal),
+            }
+        }
+    }
+
+    /// Re-check under the mutation lease, right before dispatch: the app may
+    /// have changed while this call queued for the lease. When the element is
+    /// no longer actionable, the lease is dropped (waiting never holds it),
+    /// the wait resumes under the same deadline, and `reacquire` takes a
+    /// fresh lease (re-running the caller's background gate) before checking
+    /// again.
+    pub(crate) async fn hold_actionable<T, F, Fut>(
+        &mut self,
+        waiter: &mut cua_driver_core::actionability::Waiter,
+        lease: T,
+        mut reacquire: F,
+    ) -> Result<T, cua_driver_core::protocol::ToolResult>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, cua_driver_core::protocol::ToolResult>>,
+    {
+        use cua_driver_core::actionability::Step;
+        let mut lease = lease;
+        loop {
+            let facts = self.observe(waiter.request()).await?;
+            match waiter.observe(&facts, std::time::Instant::now()) {
+                Step::Act => return Ok(lease),
+                Step::Refuse(refusal) => return Err(*refusal),
+                Step::Sleep(interval) => {
+                    drop(lease);
+                    tokio::time::sleep(interval).await;
+                    self.await_actionable(waiter).await?;
+                    lease = reacquire().await?;
+                }
+            }
+        }
+    }
+
+    /// One observation: the identity re-read (refusing a dead or recycled
+    /// element as `stale_element_token`) plus whatever else `request` needs.
+    async fn observe(
+        &mut self,
+        request: &cua_driver_core::actionability::ActionRequest,
+    ) -> Result<
+        cua_driver_core::actionability::ActionabilityFacts,
+        cua_driver_core::protocol::ToolResult,
+    > {
+        let live = match self.pending.take() {
+            Some(live) => live,
+            None => {
+                confirm_element_identity(
+                    &self.element,
+                    self.identity.clone(),
+                    self.token.as_deref(),
+                )
+                .await?
+            }
+        };
+        let needs_more = request.reads_actions()
+            || request.reads_window_frame()
+            || request.reads_editability(&live.role);
+        if !needs_more {
+            return Ok(cua_driver_core::actionability::ActionabilityFacts {
+                role: live.role,
+                frame: live.frame,
+                enabled: live.enabled,
+                ..Default::default()
+            });
+        }
+        let element = self.element.clone();
+        let request = *request;
+        let window_id = self.window_id;
+        let window_frame = self.window_frame.clone();
+        let facts = tokio::task::spawn_blocking(move || {
+            // SAFETY: `element` holds its own retain for the whole read.
+            unsafe {
+                crate::ax::actionability_facts::gather(
+                    element.as_ptr() as crate::ax::bindings::AXUIElementRef,
+                    &live,
+                    &request,
+                    window_id,
+                    window_frame,
+                )
+            }
+        })
+        .await
+        .map_err(|error| {
+            cua_driver_core::protocol::ToolResult::error(format!(
+                "Could not read the element_token's element: {error}"
+            ))
+        })?;
+        if request.reads_window_frame() {
+            self.window_frame = Some(facts.window_frame.clone());
+        }
+        Ok(facts)
+    }
+}
+
+/// [`gate_background_window_action`] for a gated element-token action:
+/// acquire the lease and run the exact-target gate, then re-check
+/// actionability under it ([`ActionTarget::hold_actionable`]), re-running
+/// both if the element stopped being actionable while the call queued. A
+/// lease taken without queuing right after the last observation skips the
+/// re-read (see `Waiter::needs_recheck`).
+pub(crate) async fn gate_actionable_window_action(
+    target: &mut ActionTarget,
+    waiter: &mut cua_driver_core::actionability::Waiter,
+    pid: i32,
+    window_id: u32,
+    element_ptr: Option<usize>,
+    action: cua_driver_core::background_input::BackgroundAction,
+) -> Result<BackgroundMutationLease, cua_driver_core::protocol::ToolResult> {
+    let (lease, queued) = acquire_background_mutation_noting_queue(pid).await;
+    lease.gate_again(window_id, element_ptr, action).await?;
+    if !waiter.needs_recheck(queued, std::time::Instant::now()) {
+        return Ok(lease);
+    }
+    target
+        .hold_actionable(waiter, lease, || {
+            gate_background_window_action(pid, window_id, element_ptr, action)
+        })
+        .await
 }
 
 /// The post-resolution identity check on its own, for a caller that must
@@ -618,6 +838,17 @@ pub(crate) async fn gate_background_window_action(
     let lease = acquire_background_mutation(pid).await;
     lease.gate_again(window_id, element_ptr, action).await?;
     Ok(lease)
+}
+
+/// [`acquire_background_mutation`], also reporting whether the call had to
+/// queue behind another mutation of the same app.
+pub(crate) async fn acquire_background_mutation_noting_queue(
+    pid: i32,
+) -> (BackgroundMutationLease, bool) {
+    match crate::background_mutation::try_acquire(pid) {
+        Some(guard) => (BackgroundMutationLease { pid, _guard: guard }, false),
+        None => (acquire_background_mutation(pid).await, true),
+    }
 }
 
 pub(crate) async fn acquire_background_mutation(pid: i32) -> BackgroundMutationLease {

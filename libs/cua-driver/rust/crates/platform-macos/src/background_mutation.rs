@@ -40,6 +40,13 @@ pub(crate) async fn acquire(pid: i32) -> OwnedMutexGuard<()> {
     process_lock(pid).lock_owned().await
 }
 
+/// [`acquire`] without waiting: `None` while another mutation for `pid` holds
+/// the lease. Lets a caller tell whether it queued behind another mutation
+/// (whose effects it must then re-check) before falling back to [`acquire`].
+pub(crate) fn try_acquire(pid: i32) -> Option<OwnedMutexGuard<()>> {
+    process_lock(pid).try_lock_owned().ok()
+}
+
 /// Run one nested tool call with non-forgeable proof that its caller already
 /// owns this process's mutation lease.
 pub(crate) async fn with_held_lease<T>(pid: i32, future: impl Future<Output = T>) -> T {
