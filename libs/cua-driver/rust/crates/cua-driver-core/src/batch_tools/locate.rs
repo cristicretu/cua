@@ -488,6 +488,9 @@ pub(crate) struct Locator<'a> {
     /// read of a window the caller never read.
     baseline_max_elements: Option<u64>,
     baselined: std::sync::Mutex<std::collections::HashSet<(i64, u64)>>,
+    /// Window reads publish no snapshot: the caller's element tokens stay
+    /// current and returned elements carry none (see [`Self::observing`]).
+    observe_only: bool,
 }
 
 impl<'a> Locator<'a> {
@@ -498,7 +501,16 @@ impl<'a> Locator<'a> {
             deadline,
             baseline_max_elements: None,
             baselined: Default::default(),
+            observe_only: false,
         }
+    }
+
+    /// Read windows without refreshing their element tokens. A standalone
+    /// `wait` polls this way; `run_steps` does not, because its later steps
+    /// act on the tokens its lookups return.
+    pub fn observing(mut self) -> Self {
+        self.observe_only = true;
+        self
     }
 
     pub fn with_observe_baseline(mut self, max_elements: u64) -> Self {
@@ -520,6 +532,17 @@ impl<'a> Locator<'a> {
 
     pub async fn call(&self, tool: &str, args: Value) -> Result<Value, String> {
         let result = self.registry.invoke(tool, self.with_session(args)).await;
+        if result.is_error == Some(true) {
+            return Err(format!("{tool}: {}", first_text(&result)));
+        }
+        Ok(result.structured_content.unwrap_or(Value::Null))
+    }
+
+    async fn call_observing(&self, tool: &str, args: Value) -> Result<Value, String> {
+        let result = self
+            .registry
+            .invoke_observation_only(tool, self.with_session(args))
+            .await;
         if result.is_error == Some(true) {
             return Err(format!("{tool}: {}", first_text(&result)));
         }
@@ -727,7 +750,7 @@ impl<'a> Locator<'a> {
     /// One fresh accessibility read. It refreshes the window's element
     /// tokens, so the tokens it returns are the ones to act with.
     pub async fn read(&self, window: &Window) -> Result<Read, Miss> {
-        if let Some(max_elements) = self.baseline_max_elements {
+        if let Some(max_elements) = self.baseline_max_elements.filter(|_| !self.observe_only) {
             let first = self
                 .baselined
                 .lock()
@@ -748,18 +771,18 @@ impl<'a> Locator<'a> {
                     .await;
             }
         }
-        let state = self
-            .call(
-                "get_window_state",
-                json!({
-                    "pid": window.pid,
-                    "window_id": window.window_id,
-                    "full_output": true,
-                    "include_screenshot": false,
-                }),
-            )
-            .await
-            .map_err(|error| Miss::new("read_failed", error).in_window(window))?;
+        let args = json!({
+            "pid": window.pid,
+            "window_id": window.window_id,
+            "full_output": true,
+            "include_screenshot": false,
+        });
+        let state = if self.observe_only {
+            self.call_observing("get_window_state", args).await
+        } else {
+            self.call("get_window_state", args).await
+        }
+        .map_err(|error| Miss::new("read_failed", error).in_window(window))?;
         let elements = state
             .get("elements")
             .and_then(Value::as_array)
@@ -840,7 +863,7 @@ impl<'a> Locator<'a> {
 
     /// One pass of a check over the windows it names. A presence check
     /// holds when any window satisfies it; `gone` holds when none shows it.
-    async fn check_once(
+    pub(crate) async fn check_once(
         &self,
         check: &Check,
         spec: &WindowSpec,

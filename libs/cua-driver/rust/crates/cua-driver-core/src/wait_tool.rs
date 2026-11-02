@@ -11,9 +11,12 @@
 //! Every read goes through the registry like any direct read, so each poll
 //! passes the same session, policy and approval checks. The tool itself is
 //! read-only: it takes no desktop input lane and no mutation lease, and polls
-//! no faster than [`locate::POLL_INTERVAL`]. A wait that reads a window
-//! replaces that window's snapshot, as any read does: act on the
-//! `element_token` the wait returns, or read again.
+//! no faster than [`locate::POLL_INTERVAL`]. Its polls publish no snapshot,
+//! so the caller's element tokens stay current while it waits and after it
+//! times out; only an element wait that holds makes one ordinary read, to
+//! return the matched element's `element_token` (that read replaces the
+//! window's snapshot, as any read does). In run_steps the wait reads like
+//! the batch's other lookups, whose tokens the later steps act on.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -335,6 +338,32 @@ pub(crate) async fn run(
     }
 }
 
+/// After an element wait held on observation reads (which carry no tokens),
+/// read the window once for real so the matched element comes back with an
+/// `element_token`. If the condition no longer holds on that read, the
+/// observed match is returned without a token rather than failing a wait
+/// that did hold.
+async fn with_fresh_token(locator: &Locator<'_>, wait: &Wait, mut waited: Waited) -> Waited {
+    let Predicate::Element(check) = &wait.predicate else {
+        return waited;
+    };
+    if check.gone || waited.element.is_none() {
+        return waited;
+    }
+    let spec = if check.window.is_empty() {
+        WindowSpec::default()
+    } else {
+        check.window.clone()
+    };
+    if let Ok(fresh) = locator.check_once(check, &spec, Instant::now()).await {
+        if fresh.element.is_some() {
+            waited.element = fresh.element;
+            waited.window = fresh.window.or(waited.window);
+        }
+    }
+    waited
+}
+
 /// Poll `once` every [`locate::POLL_INTERVAL`] until it holds, fails for a
 /// reason waiting cannot fix, or `deadline` passes.
 async fn poll<F, Fut>(started: Instant, deadline: Instant, mut once: F) -> Result<Waited, Failed>
@@ -589,9 +618,10 @@ impl Tool for WaitTool {
                 alert) of `app`/`pid` that opens, or closes with `gone:true`; or `ms` for a \
                 fixed pause. Polls every 250 ms up to `timeout_ms` (default 5000, at most \
                 60000; larger values are cut). Read-only: it never acts or takes focus. \
-                Returns what held (with the matched element and its element_token, which \
-                is from the wait's own read: reads replace the window's snapshot) or \
-                `code:\"timeout\"` with the last thing seen. Also usable as a run_steps step: \
+                Polling leaves your element_tokens current; a timeout costs none. Returns \
+                what held, or `code:\"timeout\"` with the last thing seen. An element wait \
+                that holds re-reads the window once and returns the match's fresh \
+                element_token: other tokens of that window then need a new read. Also usable as a run_steps step: \
                 {\"wait\": {...}}."
                 .into(),
             input_schema: json!({
@@ -659,12 +689,17 @@ impl Tool for WaitTool {
             .and_then(Value::as_str)
             .map(str::to_owned);
         // The locator's own stop leaves room for the last poll's read.
-        let locator = Locator::new(
-            &registry,
-            session,
-            Instant::now() + wait.timeout + locate::POLL_INTERVAL,
-        );
-        let outcome = run(&locator, &wait, &WindowSpec::default()).await;
+        let deadline = Instant::now() + wait.timeout + locate::POLL_INTERVAL;
+        let observer = Locator::new(&registry, session.clone(), deadline).observing();
+        let outcome = match run(&observer, &wait, &WindowSpec::default()).await {
+            Ok(waited) => {
+                Ok(
+                    with_fresh_token(&Locator::new(&registry, session, deadline), &wait, waited)
+                        .await,
+                )
+            }
+            failed => failed,
+        };
         let structured = report(&wait, &outcome);
         match outcome {
             Ok(waited) => {

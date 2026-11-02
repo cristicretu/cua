@@ -1057,6 +1057,10 @@ pub struct TrustedInvocationEvidence {
     /// [`ToolRegistry::invoke_with_native_window_pixels`]). Never read from
     /// arguments: only that in-process entry point sets it.
     native_window_pixels: bool,
+    /// A read that must not refresh the shared snapshot/token cache (see
+    /// [`ToolRegistry::invoke_observation_only`]). Never read from
+    /// arguments: only that in-process entry point sets it.
+    observation_only: bool,
 }
 
 impl TrustedInvocationEvidence {
@@ -1131,6 +1135,9 @@ impl TrustedInvocationEvidence {
                 crate::snapshot_store::NATIVE_WINDOW_PIXELS_ARG.to_owned(),
                 Value::Bool(true),
             );
+        }
+        if self.observation_only {
+            arguments.insert("_observation_only".to_owned(), Value::Bool(true));
         }
     }
 }
@@ -1536,7 +1543,19 @@ impl ToolRegistry {
 
     /// Invoke a tool by name and (if recording is enabled) write its result to disk.
     pub async fn invoke(&self, name: &str, args: Value) -> ToolResult {
-        self.invoke_in_process(name, args, false).await
+        self.invoke_in_process(name, args, false, false).await
+    }
+
+    /// Invoke a read that must leave the caller's element tokens alone: the
+    /// read walks the window as usual but publishes no snapshot, so tokens
+    /// from an earlier read stay current. A standalone `wait` polls this way;
+    /// a wait that times out therefore costs the caller nothing.
+    ///
+    /// Crate-internal, like the marker it sets: dispatch strips every
+    /// underscore-prefixed argument, so no caller can ask for it, and nested
+    /// calls do not inherit it.
+    pub(crate) async fn invoke_observation_only(&self, name: &str, args: Value) -> ToolResult {
+        self.invoke_in_process(name, args, false, true).await
     }
 
     /// Invoke for a trusted in-process host whose window-relative pixel
@@ -1557,7 +1576,7 @@ impl ToolRegistry {
     /// inherit it. MCP, the CLI, the SDK ABI and the wire therefore cannot
     /// reach it.
     pub async fn invoke_with_native_window_pixels(&self, name: &str, args: Value) -> ToolResult {
-        self.invoke_in_process(name, args, true).await
+        self.invoke_in_process(name, args, true, false).await
     }
 
     async fn invoke_in_process(
@@ -1565,14 +1584,17 @@ impl ToolRegistry {
         name: &str,
         args: Value,
         native_window_pixels: bool,
+        observation_only: bool,
     ) -> ToolResult {
         if let Ok(context) = DISPATCH_AUTHORIZATION_CONTEXT.try_with(Arc::clone) {
             let mut args = args;
             let mut evidence = DISPATCH_TRUSTED_INVOCATION_EVIDENCE
                 .try_with(Clone::clone)
                 .unwrap_or_default();
-            // Only the outermost in-process call vouches for its pixels.
+            // Only the outermost in-process call vouches for its pixels, and
+            // only the call that asked for it is observation-only.
             evidence.native_window_pixels = native_window_pixels;
+            evidence.observation_only = observation_only;
             crate::tool_args::sanitize_reserved_args(&mut args);
             if let Some(bound_session) = context.public_session() {
                 let Some(arguments) = args.as_object_mut() else {
@@ -1611,6 +1633,7 @@ impl ToolRegistry {
         };
         let evidence = TrustedInvocationEvidence {
             native_window_pixels,
+            observation_only,
             ..TrustedInvocationEvidence::default()
         };
         self.invoke_with_context_and_evidence(name, args, context, evidence)
@@ -2449,7 +2472,10 @@ impl ToolRegistry {
                 }));
             }
         }
-        if result.is_error != Some(true) {
+        // An observation-only read is an in-process lookup, never a public
+        // result: its elements include display-only rows without an index,
+        // which the public get_window_state contract does not admit.
+        if result.is_error != Some(true) && !evidence.observation_only {
             if let Some(structured) = result.structured_content.clone() {
                 if let Err(error) =
                     cua_driver_contract::validate_success_output(resolved_name, structured)
@@ -4981,6 +5007,44 @@ resources:
         .expect("the nested call completes");
         assert_eq!(hits.load(Ordering::SeqCst), 5);
         assert!(!marked(&last_args.lock().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn observation_only_reads_come_only_from_the_in_process_entry_point() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let last_args = Arc::new(Mutex::new(None));
+        let mut registry = super::ToolRegistry::new();
+        registry.register(Box::new(ArgumentProbe {
+            hits: hits.clone(),
+            last_args: last_args.clone(),
+            def: super::ToolDef {
+                name: "get_window_state".into(),
+                description: "test read".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+                idempotent: true,
+                open_world: false,
+            },
+        }));
+        let observing = |args: &Option<serde_json::Value>| {
+            args.as_ref().expect("arguments")["_observation_only"] == serde_json::Value::Bool(true)
+        };
+        let forged = serde_json::json!({ "_observation_only": true });
+
+        // A public or adapter caller cannot ask for a read that leaves the
+        // token cache alone; only the crate-internal entry point can.
+        registry.invoke("get_window_state", forged.clone()).await;
+        assert!(!observing(&last_args.lock().unwrap()));
+        registry
+            .invoke_from_trusted_adapter("get_window_state", forged)
+            .await;
+        assert!(!observing(&last_args.lock().unwrap()));
+        registry
+            .invoke_observation_only("get_window_state", serde_json::json!({}))
+            .await;
+        assert!(observing(&last_args.lock().unwrap()));
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
