@@ -569,6 +569,7 @@ static RULES: &[Rule] = &[
             "foreground_partial_unknown",
             "ax_action_failed",
             "app_unresponsive",
+            "ax_action_unsupported",
         ],
         build: |c| {
             RecoveryHint::new(

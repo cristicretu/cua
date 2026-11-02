@@ -961,7 +961,7 @@ impl Tool for ClickTool {
                     }
                     ToolResult::text(msg).with_structured(structured)
                 }
-                Ok(Err(e)) => ToolResult::error(format!("AX action failed: {e}")),
+                Ok(Err(e)) => crate::input::ax_actions::ax_error_result("AX action failed", &e),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             }
         } else if let (Some(mut cx), Some(mut cy)) = (x, y) {
@@ -1766,7 +1766,10 @@ fn perform_ax_click(
         }
         // Some collection rows claim a click-like action but Finder returns
         // kAXErrorCannotComplete. Use the same verified selection fallback
-        // before surfacing the dispatch error.
+        // before surfacing the dispatch error. This is the one mechanism
+        // allowed after an uncertain AX answer: `AXSelected = true` is an
+        // idempotent state write confirmed by readback, so it cannot
+        // double-fire whatever the press may have done.
         if ax_action == "AXPress" && modifiers.is_empty() {
             if let Some(selected_role) =
                 crate::input::ax_actions::select_nearest_container(element_ptr)
@@ -1783,7 +1786,14 @@ fn perform_ax_click(
                 ));
             }
         }
-        anyhow::bail!("AXUIElementPerformAction({ax_action}) returned {err}");
+        let message = format!("AXUIElementPerformAction({ax_action}) returned {err}");
+        return Err(
+            match crate::input::ax_actions::AxMutationError::from_ax_error(ax_action, err, message)
+            {
+                Some(error) => error.into(),
+                None => anyhow::anyhow!("AXUIElementPerformAction({ax_action}) returned {err}"),
+            },
+        );
     }
 
     let mut summary = format!("✅ Performed {ax_action} on [{idx}] {role} \"{title}\".");

@@ -2,6 +2,8 @@
 
 use crate::ax::bindings::*;
 use core_foundation::base::{CFEqual, CFRelease, CFRetain, CFTypeRef};
+use cua_driver_core::disposition::Disposition;
+use cua_driver_core::protocol::ToolResult;
 
 const MAX_SELECTION_ANCESTORS: usize = 8;
 
@@ -188,12 +190,171 @@ pub fn capture_nearest_container_selection(element_ptr: usize) -> Option<Selecti
     None
 }
 
+// AX error codes `bindings` does not name (HIServices `AXError.h`).
+const AX_ERROR_ILLEGAL_ARGUMENT: AXError = -25201;
+const AX_ERROR_CANNOT_COMPLETE: AXError = -25204;
+const AX_ERROR_NOT_IMPLEMENTED: AXError = -25208;
+
+/// What an AX write's return code proves about delivery.
+///
+/// Ported from agent-desktop's `crates/macos/src/actions/ax_mutation.rs`
+/// (Apache-2.0), with one change: agent-desktop lets an unsupported action
+/// fall through as not delivered, but AppKit returns
+/// `kAXErrorActionUnsupported`/`kAXErrorAttributeUnsupported` from presses it
+/// performed (#3835), so here an unsupported answer settles nothing on its
+/// own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxMutation {
+    Delivered,
+    /// `kAXErrorInvalidUIElement`: the element is gone; nothing was sent.
+    Stale,
+    /// The request never reached the app: Accessibility is off, or the
+    /// argument was refused.
+    Rejected,
+    /// The action or attribute is not supported. Only an observed effect, or
+    /// another mechanism that cannot double-fire, settles it.
+    Unsupported,
+    /// `kAXErrorFailure`, `kAXErrorCannotComplete` or an unclassified error:
+    /// the app may have acted. Never try a second mechanism after this.
+    Uncertain,
+}
+
+pub fn classify_ax_error(error: AXError) -> AxMutation {
+    if error == kAXErrorSuccess {
+        AxMutation::Delivered
+    } else if error == kAXErrorInvalidUIElement {
+        AxMutation::Stale
+    } else if error == kAXErrorAPIDisabled || error == AX_ERROR_ILLEGAL_ARGUMENT {
+        AxMutation::Rejected
+    } else if [
+        kAXErrorActionUnsupported,
+        AX_ERROR_NOT_IMPLEMENTED,
+        kAXErrorAttributeUnsupported,
+        kAXErrorNoValue,
+    ]
+    .contains(&error)
+    {
+        AxMutation::Unsupported
+    } else {
+        AxMutation::Uncertain
+    }
+}
+
+impl AxMutation {
+    /// Whether another mechanism may follow this answer. Only an answer that
+    /// proves the app did nothing, or said it cannot do this, allows one.
+    pub fn allows_another_mechanism(self) -> bool {
+        matches!(self, AxMutation::Unsupported)
+    }
+}
+
+/// A refused or failed AX write, with its structured code and disposition.
+///
+/// It travels through `anyhow` like any other error; the tool turns it into
+/// a structured result with [`ax_error_result`], so the dispatch seam keeps
+/// its disposition instead of reading a bare message as `unknown`.
+#[derive(Debug, Clone)]
+pub struct AxMutationError {
+    pub code: &'static str,
+    pub ax_error: Option<AXError>,
+    /// The AX action or attribute written, such as `AXPress`.
+    pub operation: Option<String>,
+    pub disposition: Disposition,
+    message: String,
+}
+
+impl std::fmt::Display for AxMutationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AxMutationError {}
+
+impl AxMutationError {
+    /// The error for a non-success answer to `operation`, or `None` on
+    /// success. `message` is what the caller would have said anyway.
+    pub fn from_ax_error(operation: &str, error: AXError, message: String) -> Option<Self> {
+        let (code, disposition) = match classify_ax_error(error) {
+            AxMutation::Delivered => return None,
+            AxMutation::Stale => ("stale_element_token", Disposition::not_delivered()),
+            AxMutation::Rejected if error == kAXErrorAPIDisabled => {
+                ("permission_required", Disposition::not_delivered())
+            }
+            AxMutation::Rejected => ("ax_argument_rejected", Disposition::not_delivered()),
+            AxMutation::Unsupported => ("ax_action_unsupported", Disposition::uncertain()),
+            AxMutation::Uncertain if error == AX_ERROR_CANNOT_COMPLETE => {
+                ("app_unresponsive", Disposition::uncertain())
+            }
+            AxMutation::Uncertain => ("ax_action_failed", Disposition::uncertain()),
+        };
+        Some(Self {
+            code,
+            ax_error: Some(error),
+            operation: Some(operation.to_owned()),
+            disposition,
+            message,
+        })
+    }
+
+    /// A failure after the app may have acted, whatever the last code said:
+    /// a chain that already sent part of its input.
+    pub fn uncertain(operation: &str, error: AXError, message: String) -> Self {
+        Self {
+            code: "ax_action_failed",
+            ax_error: Some(error),
+            operation: Some(operation.to_owned()),
+            disposition: Disposition::uncertain(),
+            message,
+        }
+    }
+
+    /// A refusal decided before anything was sent.
+    pub fn refused(code: &'static str, message: String) -> Self {
+        Self {
+            code,
+            ax_error: None,
+            operation: None,
+            disposition: Disposition::not_delivered(),
+            message,
+        }
+    }
+
+    fn structured(&self) -> serde_json::Value {
+        let mut structured = serde_json::json!({
+            "code": self.code,
+            "disposition": self.disposition,
+        });
+        if let Some(ax_error) = self.ax_error {
+            structured["ax_error"] = serde_json::json!(ax_error);
+        }
+        if let Some(operation) = &self.operation {
+            structured["operation"] = serde_json::json!(operation);
+        }
+        structured
+    }
+}
+
+/// The tool result for a failed element action: structured with its code and
+/// disposition when the failure is an [`AxMutationError`], plain otherwise.
+pub fn ax_error_result(prefix: &str, error: &anyhow::Error) -> ToolResult {
+    let result = ToolResult::error(format!("{prefix}: {error}"));
+    match error.downcast_ref::<AxMutationError>() {
+        Some(mutation) => result.with_structured(mutation.structured()),
+        None => result,
+    }
+}
+
 fn ensure_ax_enabled(enabled: Option<bool>, action: &str) -> anyhow::Result<()> {
     if enabled == Some(false) {
-        anyhow::bail!(
-            "refusing {action}: the target reports AXEnabled=false. \
-             Retry this action with delivery_mode:\"foreground\" or call bring_to_front first"
-        );
+        return Err(AxMutationError::refused(
+            "element_disabled",
+            format!(
+                "refusing {action}: the target reports AXEnabled=false. \
+                 Retry this action with delivery_mode:\"foreground\" or call bring_to_front first"
+            ),
+        )
+        .into());
     }
     Ok(())
 }
@@ -214,10 +375,13 @@ pub fn perform_ax_action(element_ptr: usize, action: &str) -> anyhow::Result<()>
     ensure_ax_action_enabled(element_ptr, ax_action)?;
     let err = unsafe { perform_action(element_ptr as AXUIElementRef, ax_action) };
 
-    if err == kAXErrorSuccess {
-        Ok(())
-    } else {
-        anyhow::bail!("AXUIElementPerformAction({action}) failed with error {err}")
+    match AxMutationError::from_ax_error(
+        ax_action,
+        err,
+        format!("AXUIElementPerformAction({action}) failed with error {err}"),
+    ) {
+        None => Ok(()),
+        Some(error) => Err(error.into()),
     }
 }
 
@@ -322,6 +486,104 @@ mod tests {
         assert!(message.contains("AXEnabled=false"));
         assert!(message.contains("delivery_mode:\"foreground\""));
         assert!(message.contains("bring_to_front"));
+    }
+
+    #[test]
+    fn a_disabled_refusal_says_nothing_was_sent() {
+        let error = ensure_ax_enabled(Some(false), "AXPress").unwrap_err();
+        let mutation = error.downcast_ref::<AxMutationError>().expect("typed");
+        assert_eq!(mutation.code, "element_disabled");
+        assert!(mutation.disposition.is_retry_safe());
+        // The batch foreground fallback still recognises the message.
+        let result = ax_error_result("AX action failed", &error);
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "element_disabled"
+        );
+    }
+
+    #[test]
+    fn ax_errors_classify_like_agent_desktop_except_unsupported() {
+        use cua_driver_core::disposition::{DeliveryDisposition, RetryDisposition};
+        assert_eq!(classify_ax_error(kAXErrorSuccess), AxMutation::Delivered);
+        assert!(
+            AxMutationError::from_ax_error("AXPress", kAXErrorSuccess, String::new()).is_none()
+        );
+        let cases = [
+            (
+                kAXErrorInvalidUIElement,
+                "stale_element_token",
+                RetryDisposition::Safe,
+            ),
+            (
+                kAXErrorAPIDisabled,
+                "permission_required",
+                RetryDisposition::Safe,
+            ),
+            (
+                AX_ERROR_ILLEGAL_ARGUMENT,
+                "ax_argument_rejected",
+                RetryDisposition::Safe,
+            ),
+            (
+                kAXErrorFailure,
+                "ax_action_failed",
+                RetryDisposition::Unsafe,
+            ),
+            (
+                AX_ERROR_CANNOT_COMPLETE,
+                "app_unresponsive",
+                RetryDisposition::Unsafe,
+            ),
+            (-25299, "ax_action_failed", RetryDisposition::Unsafe),
+            // AppKit answers presses it performed with these (#3835).
+            (
+                kAXErrorActionUnsupported,
+                "ax_action_unsupported",
+                RetryDisposition::Unsafe,
+            ),
+            (
+                kAXErrorAttributeUnsupported,
+                "ax_action_unsupported",
+                RetryDisposition::Unsafe,
+            ),
+        ];
+        for (error, code, retry) in cases {
+            let mutation =
+                AxMutationError::from_ax_error("AXPress", error, format!("returned {error}"))
+                    .expect("an error");
+            assert_eq!(mutation.code, code, "{error}");
+            assert_eq!(mutation.disposition.retry, retry, "{error}");
+            assert_ne!(mutation.disposition.delivery, DeliveryDisposition::Unknown);
+            let result = ax_error_result("AX action failed", &mutation.clone().into());
+            let structured = result.structured_content.expect("structured");
+            assert_eq!(structured["code"], code);
+            assert_eq!(structured["ax_error"], error);
+            assert_eq!(structured["operation"], "AXPress");
+        }
+    }
+
+    #[test]
+    fn only_an_unsupported_answer_allows_another_mechanism() {
+        assert!(classify_ax_error(kAXErrorActionUnsupported).allows_another_mechanism());
+        for error in [
+            kAXErrorFailure,
+            AX_ERROR_CANNOT_COMPLETE,
+            kAXErrorInvalidUIElement,
+            kAXErrorAPIDisabled,
+            -25299,
+        ] {
+            assert!(
+                !classify_ax_error(error).allows_another_mechanism(),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_error_stays_plain() {
+        let result = ax_error_result("AX action failed", &anyhow::anyhow!("boom"));
+        assert!(result.structured_content.is_none());
     }
 
     #[test]

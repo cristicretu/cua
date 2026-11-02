@@ -272,7 +272,7 @@ impl Tool for SetValueTool {
                 }
                 ToolResult::text(msg).with_structured(structured)
             }
-            Ok(Err(e)) => ToolResult::error(format!("set_value failed: {e}")),
+            Ok(Err(e)) => crate::input::ax_actions::ax_error_result("set_value failed", &e),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
     }
@@ -595,10 +595,24 @@ fn set_value_blocking(
                     document_edited: None,
                 })
             } else {
-                anyhow::bail!("AXUIElementSetAttributeValue(AXValue) failed with error {err}")
+                // Stepping may have moved the control part of the way before
+                // it stuck, so the outcome is uncertain whatever `err` said.
+                Err(crate::input::ax_actions::AxMutationError::uncertain(
+                    "AXValue",
+                    err,
+                    format!("AXUIElementSetAttributeValue(AXValue) failed with error {err}"),
+                )
+                .into())
             }
         } else {
-            anyhow::bail!("AXUIElementSetAttributeValue(AXValue) failed with error {err}")
+            let message = format!("AXUIElementSetAttributeValue(AXValue) failed with error {err}");
+            Err(crate::input::ax_actions::AxMutationError::from_ax_error(
+                "AXValue",
+                err,
+                message.clone(),
+            )
+            .map(anyhow::Error::from)
+            .unwrap_or_else(|| anyhow::anyhow!(message)))
         }
     }
 }

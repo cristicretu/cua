@@ -59,6 +59,8 @@ pub const MAY_HAVE_DELIVERED: &[&str] = &[
     // or an unclassified error (agent-desktop `ax_mutation.rs`).
     "ax_action_failed",
     "app_unresponsive",
+    // AppKit returns "unsupported" from presses it performed (#3835).
+    "ax_action_unsupported",
 ];
 
 /// The disposition a structured result already declares, when it is valid.

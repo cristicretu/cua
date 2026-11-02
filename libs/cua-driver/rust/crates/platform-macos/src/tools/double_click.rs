@@ -162,7 +162,7 @@ impl Tool for DoubleClickTool {
 
             return match result {
                 Ok(Ok(msg)) => ToolResult::text(format!("{msg}{}", changes.result_suffix())),
-                Ok(Err(e)) => ToolResult::error(format!("double_click failed: {e}")),
+                Ok(Err(e)) => crate::input::ax_actions::ax_error_result("double_click failed", &e),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
         }
@@ -210,11 +210,26 @@ fn ax_double_click(
         if err == kAXErrorSuccess {
             return Ok(format!("AXOpen performed on element [{idx}]."));
         }
-        if !foreground {
-            anyhow::bail!(
-                "AXOpen returned {err} for element [{idx}]; background delivery will not \
-                 improvise a pointer fallback after choosing the semantic route"
-            );
+        // A foreground pixel double-click may follow only an answer that
+        // proves AXOpen did nothing; after kAXErrorFailure or
+        // kAXErrorCannotComplete the item may already be opening.
+        let mutation = crate::input::ax_actions::classify_ax_error(err);
+        if !foreground || !mutation.allows_another_mechanism() {
+            let message = if foreground {
+                format!("AXOpen returned {err} for element [{idx}]; it may have opened, so no pixel double-click follows")
+            } else {
+                format!(
+                    "AXOpen returned {err} for element [{idx}]; background delivery will not \
+                     improvise a pointer fallback after choosing the semantic route"
+                )
+            };
+            return Err(crate::input::ax_actions::AxMutationError::from_ax_error(
+                "AXOpen",
+                err,
+                message.clone(),
+            )
+            .map(anyhow::Error::from)
+            .unwrap_or_else(|| anyhow::anyhow!(message)));
         }
         tracing::debug!(
             "AXOpen returned {err} for element [{idx}], falling back to pixel double-click"
