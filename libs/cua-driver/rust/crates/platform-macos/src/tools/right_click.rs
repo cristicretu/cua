@@ -99,7 +99,7 @@ impl Tool for RightClickTool {
         let cursor_key = super::cursor_tools::resolve_cursor_key(&args);
 
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match self.state.snapshots.resolve(pid, &args) {
+        let resolved = match super::resolve_element(&self.state, pid, &args).await {
             Ok(r) => r,
             Err(e) => return e,
         };

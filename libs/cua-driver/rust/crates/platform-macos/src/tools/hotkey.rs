@@ -254,7 +254,7 @@ impl Tool for HotkeyTool {
         let key = non_modifiers.last().unwrap().clone();
         let key_display = raw_keys.join("+");
         let window_id_arg = args.opt_u64("window_id");
-        let resolved = match self.state.snapshots.resolve(pid, &args) {
+        let resolved = match super::resolve_element(&self.state, pid, &args).await {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };

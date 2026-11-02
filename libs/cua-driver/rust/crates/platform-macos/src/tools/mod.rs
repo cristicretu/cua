@@ -332,6 +332,70 @@ pub(crate) fn element_action_snapshot(
     }
 }
 
+/// Resolve the call's `element_token` and confirm, on the live element, that
+/// it is still the element the snapshot recorded (strict token identity, see
+/// `cua_driver_core::ref_identity`). Every token-addressed tool resolves
+/// through here, on the foreground path as well as the background one, before
+/// any gate or actuator runs. A dead element (-25202) or one that now shows
+/// other content (a recycled table cell) is refused as `stale_element_token`:
+/// nothing is sent and the retained element is never swapped for another.
+/// Costs one multi-attribute AX read per action (plus an ancestry climb for
+/// elements no text names).
+pub(crate) async fn resolve_element(
+    state: &ToolState,
+    pid: i32,
+    args: &serde_json::Value,
+) -> Result<
+    cua_driver_core::element_token::ResolvedElement<crate::ax::snapshot::RetainedElement>,
+    cua_driver_core::protocol::ToolResult,
+> {
+    use cua_driver_core::element_token::ResolvedElement;
+    let (resolved, identity) = state.snapshots.resolve_identified(pid, args)?;
+    if let (ResolvedElement::Element { element, .. }, Some(identity)) = (&resolved, identity) {
+        confirm_element_identity(element, identity, args["element_token"].as_str()).await?;
+    }
+    Ok(resolved)
+}
+
+/// The post-resolution identity check on its own, for a caller that must
+/// re-confirm a resolved element later (after waiting, or after acquiring
+/// the mutation lease). `Ok` carries the live facts it read, including the
+/// element's current frame and `AXEnabled`, so a following check need not
+/// read them again. `Err` is the structured `stale_element_token` refusal.
+pub(crate) async fn confirm_element_identity(
+    element: &crate::ax::snapshot::RetainedElement,
+    identity: cua_driver_core::ref_identity::RefIdentity,
+    token: Option<&str>,
+) -> Result<cua_driver_core::ref_identity::LiveElementFacts, cua_driver_core::protocol::ToolResult>
+{
+    use cua_driver_core::ref_identity::{
+        check_identity, stale_element_refusal, LiveRead, StaleReason,
+    };
+    let element = element.clone();
+    let checked = tokio::task::spawn_blocking(move || {
+        // SAFETY: `element` holds its own retain for the whole read.
+        let read = unsafe {
+            crate::ax::ref_verify::read_live_identity(
+                element.as_ptr() as crate::ax::bindings::AXUIElementRef,
+                &identity,
+            )
+        };
+        match (check_identity(&identity, &read), read) {
+            (Ok(_), LiveRead::Facts(facts)) => Ok(*facts),
+            (Err(reason), _) => Err(reason),
+            (Ok(_), LiveRead::Invalid) => Err(StaleReason::ElementInvalid),
+        }
+    })
+    .await;
+    match checked {
+        Ok(Ok(facts)) => Ok(facts),
+        Ok(Err(reason)) => Err(stale_element_refusal(reason, token)),
+        Err(error) => Err(cua_driver_core::protocol::ToolResult::error(format!(
+            "Could not confirm the element_token's element: {error}"
+        ))),
+    }
+}
+
 /// Convert a pure background-input refusal into the structured refusal result
 /// shape shared by exact-target tools: `code`, `effect: "refused"`, the
 /// requested target, and the safe next route when one exists. No actuator ran.
