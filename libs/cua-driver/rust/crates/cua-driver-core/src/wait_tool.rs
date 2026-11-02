@@ -597,7 +597,7 @@ impl Tool for WaitTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "session": { "type": "string", "description": "Public session label, as on other calls." },
+                    "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it." },
                     "pid": { "type": "integer", "description": "Target process." },
                     "window_id": { "type": "integer", "description": "Exact window, with pid." },
                     "app": { "type": "string", "description": "App name or bundle id, instead of pid." },
@@ -610,7 +610,7 @@ impl Tool for WaitTool {
                     "gone": { "type": "boolean", "description": "Wait for the element, window or surface to disappear." },
                     "value": { "type": "string", "description": "Element value equals this." },
                     "value_contains": { "type": "string", "description": "Element value contains this." },
-                    "enabled": { "type": "boolean" },
+                    "enabled": { "type": "boolean", "description": "Enabled (true) or disabled (false)." },
                     "selected": { "type": "boolean", "description": "Selected or checked." },
                     "count": { "type": "integer", "minimum": 1, "description": "Exactly this many matches." },
                     "surface": { "type": "string", "enum": SURFACE_KINDS, "description": "Wait for an open menu (menu bar or context), sheet, popover or alert of the app." },
