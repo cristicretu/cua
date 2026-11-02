@@ -2039,6 +2039,7 @@ mod tests {
             enabled: None,
             selected: None,
             in_web_content: false,
+            subtree: Default::default(),
         }
     }
 
@@ -2056,6 +2057,8 @@ mod tests {
             truncated: false,
             walk: cua_driver_core::walk_budget::WalkBudget::nodes_only(0).outcome(),
             window_scope: Some(crate::ax::WindowScope::Matched),
+            observed: Default::default(),
+            menus_collapsed: false,
         }
     }
 
@@ -2391,6 +2394,8 @@ mod tests {
                 std::time::Duration::from_millis(1000),
             ),
             window_scope: Some(crate::ax::WindowScope::Matched),
+            observed: Default::default(),
+            menus_collapsed: false,
         };
         assert!(
             exact_pixel_setup_checkbox(0, &truncated, 0, chrome(), false)

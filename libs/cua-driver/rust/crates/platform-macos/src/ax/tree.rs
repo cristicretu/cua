@@ -15,7 +15,9 @@ use super::bindings::*;
 use super::launch::{is_still_launching, LaunchStep, LaunchWait};
 use super::window_scope::{decide_window_scope, ScopeDecision, TopLevelCandidate, WindowScope};
 use core_foundation::base::{CFEqual, CFRelease, CFRetain, CFTypeRef};
-use cua_driver_core::walk_budget::{WalkBudget, WalkOutcome};
+use cua_driver_core::walk_budget::{
+    depth_cut, is_drill_anchor, CompletenessFacts, Observed, SubtreeMark, WalkBudget, WalkOutcome,
+};
 use std::time::Instant;
 
 /// Default maximum depth for AX tree walks. Deep menus and complex web views
@@ -95,6 +97,10 @@ pub struct AXNode {
     /// This trust marker is independent of actionable ancestry because
     /// AXWebArea is commonly non-actionable and therefore has no element index.
     pub in_web_content: bool,
+    /// What the walk did not observe below this row (depth clamp, budget,
+    /// unreadable children), and whether the row is indexed only as a
+    /// `root` drill target.
+    pub subtree: SubtreeMark,
 }
 
 #[derive(Default)]
@@ -151,6 +157,30 @@ pub struct TreeWalkResult {
     /// [`WindowScope::Matched`] comes with an EMPTY walk, so `nodes` never
     /// describes a window other than the requested one.
     pub window_scope: Option<WindowScope>,
+    /// Merge of every walked top-level subtree's completeness. Together with
+    /// `walk` it decides `elements_complete` ([`TreeWalkResult::complete`]).
+    pub observed: Observed,
+    /// Closed menu-bar menus were listed by title only
+    /// ([`with_menus_collapsed`]).
+    pub menus_collapsed: bool,
+}
+
+impl TreeWalkResult {
+    /// Whether this walk saw every element of its scope, so absence from it
+    /// is evidence of absence. Fails closed: see
+    /// [`cua_driver_core::walk_budget::elements_complete`].
+    pub fn complete(&self, degraded: bool) -> bool {
+        cua_driver_core::walk_budget::elements_complete(CompletenessFacts {
+            walk_truncated: self.walk.truncated(),
+            subtrees: self.observed,
+            scope_matched: self
+                .window_scope
+                .as_ref()
+                .is_none_or(WindowScope::is_matched),
+            menus_collapsed: self.menus_collapsed,
+            degraded,
+        })
+    }
 }
 
 /// Walk the AX tree of `pid`, optionally filtered to a specific window.
@@ -242,6 +272,7 @@ fn walk_tree_with_web_content(
     let mut lines: Vec<(usize, String)> = Vec::new(); // (depth, line)
     let mut index_counter = 0usize;
     let mut window_scope: Option<WindowScope> = None;
+    let mut observed = Observed::Complete;
 
     unsafe {
         let app_elem = AXUIElementCreateApplication(pid);
@@ -254,6 +285,8 @@ fn walk_tree_with_web_content(
                 // No application AX element at all, so a requested window
                 // certainly did not resolve.
                 window_scope: window_id.map(|_| WindowScope::AxUnresolved { ax_window_count: 0 }),
+                observed: Observed::Skipped,
+                menus_collapsed: false,
             };
         }
         set_messaging_timeout(app_elem);
@@ -313,7 +346,7 @@ fn walk_tree_with_web_content(
 
         // Walk each top-level child at depth 0.
         for child in walk_these {
-            walk_element(
+            observed = observed.merge(walk_element(
                 child,
                 0,
                 None,
@@ -324,7 +357,7 @@ fn walk_tree_with_web_content(
                 &mut budget,
                 max_depth,
                 include_web_content,
-            );
+            ));
         }
 
         // Release all top-level elements (copy_children / copy_ax_windows both retain).
@@ -333,6 +366,20 @@ fn walk_tree_with_web_content(
         CFRelease(app_elem as CFTypeRef);
     }
 
+    finish_walk(nodes, lines, &budget, query, window_scope, observed)
+}
+
+/// Render a finished walk: markdown (query-filtered, with the PARTIAL TREE
+/// note) plus the completeness facts. Shared by the window walk and the
+/// `root` drill-down walk.
+fn finish_walk(
+    nodes: Vec<AXNode>,
+    mut lines: Vec<(usize, String)>,
+    budget: &WalkBudget,
+    query: Option<&str>,
+    window_scope: Option<WindowScope>,
+    observed: Observed,
+) -> TreeWalkResult {
     let walk = budget.outcome();
     prune_echo_text_rows(&mut lines);
     let raw_markdown = render_lines(&lines);
@@ -347,13 +394,134 @@ fn walk_tree_with_web_content(
         tree_markdown.push_str(&note);
     }
 
+    // Collapsing applies to AXMenuBarItem rows only; a walk that met none
+    // left nothing out.
+    let menus_collapsed = MENUS_COLLAPSED.with(std::cell::Cell::get)
+        && nodes.iter().any(|node| node.role == "AXMenuBarItem");
     TreeWalkResult {
         tree_markdown,
         nodes,
         truncated: walk.truncated(),
         walk,
         window_scope,
+        observed,
+        menus_collapsed,
     }
+}
+
+/// Why a `root` drill-down could not start from its element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtreeRootError {
+    /// The retained element no longer exists (`kAXErrorInvalidUIElement`):
+    /// its row was destroyed since the snapshot.
+    Gone,
+}
+
+/// Walk the subtree under `root` (a retained element from an earlier
+/// snapshot) for a `get_window_state` `root` drill-down. `root` is row
+/// depth 0; caps, budget, query filtering and completeness work as in the
+/// window walk. The result is scoped [`WindowScope::Matched`]: the token the
+/// caller passed was minted for this window, and the snapshot store refuses
+/// it otherwise.
+///
+/// A drill-down from inside web content must keep the `in_web_content`
+/// trust marker the full walk would have given it, so the root's ancestors
+/// are read up to the window; an ancestor that cannot be read marks the
+/// subtree as web content (fail closed: it then never proves absence).
+///
+/// # Safety
+///
+/// `root` must be a retained `AXUIElementRef`, alive for the call.
+pub unsafe fn walk_subtree_budgeted(
+    root: AXUIElementRef,
+    query: Option<&str>,
+    max_depth: usize,
+    mut budget: WalkBudget,
+) -> Result<TreeWalkResult, SubtreeRootError> {
+    set_messaging_timeout(root);
+    if attr_error(root, "AXRole") == kAXErrorInvalidUIElement {
+        return Err(SubtreeRootError::Gone);
+    }
+    let in_web_content = ancestors_in_web_content(root);
+    let mut nodes: Vec<AXNode> = Vec::new();
+    let mut lines: Vec<(usize, String)> = Vec::new();
+    let mut index_counter = 0usize;
+    let observed = walk_element(
+        root,
+        0,
+        None,
+        in_web_content,
+        &mut nodes,
+        &mut lines,
+        &mut index_counter,
+        &mut budget,
+        max_depth,
+        true,
+    );
+    Ok(finish_walk(
+        nodes,
+        lines,
+        &budget,
+        query,
+        Some(WindowScope::Matched),
+        observed,
+    ))
+}
+
+/// The AX error of reading `attr`, releasing any value.
+unsafe fn attr_error(element: AXUIElementRef, attr: &str) -> AXError {
+    use core_foundation::{base::TCFType, string::CFString};
+    let name = CFString::new(attr);
+    let mut value: CFTypeRef = std::ptr::null();
+    let err = AXUIElementCopyAttributeValue(element, name.as_concrete_TypeRef(), &mut value);
+    if !value.is_null() {
+        CFRelease(value);
+    }
+    err
+}
+
+/// Whether any ancestor of `element` up to its window is a web-document
+/// root. Unknown (an unreadable or unterminated parent chain) is `true`.
+unsafe fn ancestors_in_web_content(element: AXUIElementRef) -> bool {
+    /// Far deeper than any real AX chain; a cycle or a runaway provider
+    /// ends here as unknown.
+    const MAX_ANCESTORS: usize = 256;
+    if matches!(
+        copy_string_attr(element, "AXRole").as_deref(),
+        Some("AXWindow" | "AXApplication")
+    ) {
+        return false;
+    }
+    let mut current = copy_element_attr(element, "AXParent");
+    for _ in 0..MAX_ANCESTORS {
+        // Every element's chain ends at its window or application; a chain
+        // that stops short could not be read.
+        let Some(parent) = current else {
+            return true;
+        };
+        set_messaging_timeout(parent);
+        let next = match copy_string_attr(parent, "AXRole").as_deref() {
+            None => {
+                CFRelease(parent as CFTypeRef);
+                return true;
+            }
+            Some(role) if is_web_content_role(role) => {
+                CFRelease(parent as CFTypeRef);
+                return true;
+            }
+            Some("AXWindow" | "AXApplication") => {
+                CFRelease(parent as CFTypeRef);
+                return false;
+            }
+            Some(_) => copy_element_attr(parent, "AXParent"),
+        };
+        CFRelease(parent as CFTypeRef);
+        current = next;
+    }
+    if let Some(parent) = current {
+        CFRelease(parent as CFTypeRef);
+    }
+    true
 }
 
 /// The application's top-level AX children: `AXChildren` ∪ `AXWindows`.
@@ -428,6 +596,11 @@ unsafe fn release_all(elements: Vec<AXUIElementRef>) {
     }
 }
 
+/// Walk one element and its subtree, returning how much of it was observed
+/// (see [`Observed`]). A rendered row records what its own subtree missed in
+/// [`AXNode::subtree`]; transparent containers pass their children's result
+/// up to the nearest rendered row, so the cut lands on a row a caller can
+/// see and drill into.
 #[allow(clippy::too_many_arguments)]
 unsafe fn walk_element(
     element: AXUIElementRef,
@@ -440,14 +613,14 @@ unsafe fn walk_element(
     budget: &mut WalkBudget,
     max_depth: usize,
     include_web_content: bool,
-) {
+) -> Observed {
     if depth > max_depth {
-        return;
+        return Observed::Skipped;
     }
     // Node and time budget: a refused node is counted as discovered but not
     // visited, and the walk unwinds with the partial tree it has.
     if !budget.admit() {
-        return;
+        return Observed::Skipped;
     }
 
     // Messaging timeouts are per AX object, not inherited from the application
@@ -458,7 +631,8 @@ unsafe fn walk_element(
 
     let in_web_content = in_web_content || is_web_content_role(&role);
     if in_web_content && !include_web_content {
-        return;
+        // A deliberate exclusion (native-chrome walks), not a gap.
+        return Observed::Complete;
     }
 
     // Skip pure layout containers that have no interesting content.
@@ -466,9 +640,10 @@ unsafe fn walk_element(
         // Still recurse — children may be interesting. Layout containers
         // collapse, so children inherit the parent's depth AND the same
         // parent_index (no actionable node was emitted here).
-        let children = copy_children(element);
+        let (children, read) = copy_children_checked(element);
+        let mut observed = children_read_observed(read);
         for child in children {
-            walk_element(
+            observed = observed.merge(walk_element(
                 child,
                 depth,
                 parent_index,
@@ -479,10 +654,10 @@ unsafe fn walk_element(
                 budget,
                 max_depth,
                 include_web_content,
-            );
+            ));
             CFRelease(child as CFTypeRef);
         }
-        return;
+        return observed;
     }
 
     // Keep AXTitle and AXDescription SEPARATE so that the tree format matches
@@ -532,10 +707,26 @@ unsafe fn walk_element(
     };
     let is_actionable = is_addressable(!actions.is_empty(), value_settable, enabled);
 
-    if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
-        let children = copy_children(element);
+    // A closed menu of the menu bar stays collapsed when the caller asked for
+    // it: its items are reachable through invoke_menu or a query, and walking
+    // them cost most of a read (94% of a Chrome window read in a VM check)
+    // and ate the node budget before the window content.
+    let collapse_here = role == "AXMenuBarItem"
+        && MENUS_COLLAPSED.with(std::cell::Cell::get)
+        && copy_bool_attr(element, "AXSelected") != Some(true);
+    let (children, children_read) = if collapse_here {
+        (Vec::new(), true)
+    } else {
+        copy_children_checked(element)
+    };
+    // Children past the depth clamp are not walked; the row says how many
+    // there are instead of dropping them silently.
+    let cut = depth_cut(depth, max_depth, children.len());
+
+    if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" && !cut {
+        let mut observed = children_read_observed(children_read);
         for child in children {
-            walk_element(
+            observed = observed.merge(walk_element(
                 child,
                 depth + 1,
                 parent_index,
@@ -546,12 +737,15 @@ unsafe fn walk_element(
                 budget,
                 max_depth,
                 include_web_content,
-            );
+            ));
             CFRelease(child as CFTypeRef);
         }
-        return;
+        return observed;
     }
 
+    // A row the clamp cut is indexed even when it is not addressable, so its
+    // token can be passed as `root` to read the hidden children.
+    let drill_anchor = is_drill_anchor(is_actionable, cut);
     let element_ptr = element as usize;
     let frame = element_screen_rect(element);
     // Structured `elements` only contains actionable nodes. Keep all new AX
@@ -571,79 +765,54 @@ unsafe fn walk_element(
         enabled,
         selected: copy_bool_attr(element, "AXSelected"),
     });
-    let node = if is_actionable {
+    let element_index = (is_actionable || drill_anchor).then(|| {
         let idx = *counter;
         *counter += 1;
         // Retain so the element stays alive in the cache after `copy_children`
         // releases the per-child ref at the end of the caller's loop.
         CFRetain(element as CFTypeRef);
-        AXNode {
-            element_index: Some(idx),
-            role: role.clone(),
-            title: if visible_title.is_empty() {
-                None
-            } else {
-                Some(visible_title.clone())
-            },
-            value: if visible_value.is_empty() {
-                None
-            } else {
-                Some(visible_value.clone())
-            },
-            description: if visible_description.is_empty() {
-                None
-            } else {
-                Some(visible_description.clone())
-            },
-            identifier: identifier.clone(),
-            help: help.clone(),
-            actions: actions.clone(),
-            element_ptr,
-            depth,
-            parent_element_index: parent_index,
-            frame,
-            value_state: control_state.value_state.clone(),
-            value_description: control_state.value_description.clone(),
-            min_value: control_state.min_value,
-            max_value: control_state.max_value,
-            enabled: control_state.enabled,
-            selected: control_state.selected,
-            in_web_content,
-        }
-    } else {
-        AXNode {
-            element_index: None,
-            role: role.clone(),
-            title: if visible_title.is_empty() {
-                None
-            } else {
-                Some(visible_title.clone())
-            },
-            value: if visible_value.is_empty() {
-                None
-            } else {
-                Some(visible_value.clone())
-            },
-            description: if visible_description.is_empty() {
-                None
-            } else {
-                Some(visible_description.clone())
-            },
-            identifier: identifier.clone(),
-            help: help.clone(),
-            actions: vec![],
-            element_ptr,
-            depth,
-            parent_element_index: parent_index,
-            frame,
-            value_state: control_state.value_state.clone(),
-            value_description: control_state.value_description.clone(),
-            min_value: control_state.min_value,
-            max_value: control_state.max_value,
-            enabled: control_state.enabled,
-            selected: control_state.selected,
-            in_web_content,
-        }
+        idx
+    });
+    let node = AXNode {
+        element_index,
+        role: role.clone(),
+        title: if visible_title.is_empty() {
+            None
+        } else {
+            Some(visible_title.clone())
+        },
+        value: if visible_value.is_empty() {
+            None
+        } else {
+            Some(visible_value.clone())
+        },
+        description: if visible_description.is_empty() {
+            None
+        } else {
+            Some(visible_description.clone())
+        },
+        identifier: identifier.clone(),
+        help: help.clone(),
+        actions: if is_actionable {
+            actions.clone()
+        } else {
+            vec![]
+        },
+        element_ptr,
+        depth,
+        parent_element_index: parent_index,
+        frame,
+        value_state: control_state.value_state.clone(),
+        value_description: control_state.value_description.clone(),
+        min_value: control_state.min_value,
+        max_value: control_state.max_value,
+        enabled: control_state.enabled,
+        selected: control_state.selected,
+        in_web_content,
+        subtree: SubtreeMark {
+            drill_anchor,
+            ..SubtreeMark::default()
+        },
     };
 
     // Track this node as the parent for its descendants only when it was
@@ -651,39 +820,56 @@ unsafe fn walk_element(
     // indexed rows are addressable in click(element_index=N)).
     let next_parent = node.element_index.or(parent_index);
 
-    // A closed menu of the menu bar stays collapsed when the caller asked for
-    // it: its items are reachable through invoke_menu or a query, and walking
-    // them cost most of a read (94% of a Chrome window read in a VM check)
-    // and ate the node budget before the window content.
-    let collapse_here = role == "AXMenuBarItem"
-        && MENUS_COLLAPSED.with(std::cell::Cell::get)
-        && copy_bool_attr(element, "AXSelected") != Some(true);
     let line = if role == "AXMenuBar" && MENUS_COLLAPSED.with(std::cell::Cell::get) {
         format!("{} {COLLAPSED_MENU_NOTE}", format_node_line(&node))
     } else {
         format_node_line(&node)
     };
+    let row = lines.len();
+    let at = nodes.len();
     lines.push((depth, line));
     nodes.push(node);
-    if collapse_here {
-        return;
-    }
 
-    let children = copy_children(element);
+    let child_count = children.len();
+    let mut observed = children_read_observed(children_read);
     for child in children {
-        walk_element(
-            child,
-            depth + 1,
-            next_parent,
-            in_web_content,
-            nodes,
-            lines,
-            counter,
-            budget,
-            max_depth,
-            include_web_content,
-        );
+        if !cut {
+            observed = observed.merge(walk_element(
+                child,
+                depth + 1,
+                next_parent,
+                in_web_content,
+                nodes,
+                lines,
+                counter,
+                budget,
+                max_depth,
+                include_web_content,
+            ));
+        }
         CFRelease(child as CFTypeRef);
+    }
+    let mark = SubtreeMark {
+        drill_anchor,
+        ..SubtreeMark::from_children(observed, cut.then_some(child_count))
+    };
+    if let Some(suffix) = mark.row_suffix() {
+        lines[row].1.push_str(&suffix);
+    }
+    nodes[at].subtree = mark;
+    if mark.truncated {
+        Observed::Partial
+    } else {
+        Observed::Complete
+    }
+}
+
+/// A child list that could not be read is a gap right at this row.
+fn children_read_observed(answered: bool) -> Observed {
+    if answered {
+        Observed::Complete
+    } else {
+        Observed::Skipped
     }
 }
 

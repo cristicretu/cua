@@ -1847,6 +1847,7 @@ impl Tool for GetWindowStateTool {
                                     .get("max_depth")
                                     .and_then(|v| v.as_u64())
                                     .map(|v| v as usize),
+                                scope: None,
                             },
                             focus_probe: None,
                         },

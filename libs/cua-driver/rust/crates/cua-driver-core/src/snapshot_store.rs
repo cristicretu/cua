@@ -33,6 +33,32 @@ struct Snapshot<S> {
     zoom: Option<ZoomContext>,
     semantic: bool,
     payload: S,
+    /// For a `root` drill-down: the snapshot and row its root token named.
+    drill_root: Option<(u32, usize)>,
+    /// `root` drill-downs read under this snapshot. They are the one
+    /// exception to "a new snapshot of the window replaces the current one":
+    /// a drill-down adds tokens without staling this snapshot's, and lives
+    /// and dies with it (replacement, eviction, removal, session end).
+    drill_downs: Vec<Snapshot<S>>,
+}
+
+/// Drill-downs kept per window snapshot; the oldest is retired past this.
+pub const DRILL_DOWNS_PER_SNAPSHOT: usize = 4;
+
+/// The current snapshot or drill-down with this id.
+fn find_snapshot<S>(lane: &[Snapshot<S>], id: u32) -> Option<&Snapshot<S>> {
+    lane.iter().find_map(|snapshot| {
+        if snapshot.id == id {
+            Some(snapshot)
+        } else {
+            snapshot.drill_downs.iter().find(|drill| drill.id == id)
+        }
+    })
+}
+
+/// A retired snapshot's id followed by its drill-downs' ids.
+fn retired_ids<S>(snapshot: &Snapshot<S>) -> impl Iterator<Item = u32> + '_ {
+    std::iter::once(snapshot.id).chain(snapshot.drill_downs.iter().map(|drill| drill.id))
 }
 
 impl<S> Snapshot<S> {
@@ -430,10 +456,74 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
                 zoom: None,
                 semantic,
                 payload,
+                drill_root: None,
+                drill_downs: Vec::new(),
             });
             (id, retired)
         };
-        let invalidated = retired.iter().map(|snapshot| snapshot.id).collect();
+        let invalidated = retired.iter().flat_map(retired_ids).collect();
+        drop(retired);
+        Some((id, invalidated))
+    }
+
+    /// Publish a `root` drill-down of the window's current snapshot WITHOUT
+    /// replacing it: the parent's tokens stay valid and the drill-down's
+    /// rows get tokens of their own. `source` is the snapshot the root token
+    /// named (the parent or one of its drill-downs); `None` means the
+    /// window's current snapshot (a bare row number). Returns the new id and
+    /// the drill-downs it retired (an earlier read of the same root, or the
+    /// oldest past [`DRILL_DOWNS_PER_SNAPSHOT`]); `None` when the source is
+    /// no longer current, so the walk raced a replacing read and its root
+    /// token is stale, or the session ended.
+    pub fn publish_drill_down_for_session(
+        &self,
+        pid: i32,
+        window_id: u64,
+        source: Option<u32>,
+        root_index: usize,
+        payload: S,
+        session: Option<&str>,
+    ) -> Option<(u32, Vec<u32>)> {
+        let (id, retired) = {
+            let mut inner = self.inner.lock().unwrap();
+            if session.is_some_and(crate::session::is_session_ended) {
+                return None;
+            }
+            let parent = inner.get_mut(&pid)?.iter_mut().find(|snapshot| {
+                snapshot.window_id == window_id
+                    && source.is_none_or(|source| {
+                        snapshot.id == source
+                            || snapshot.drill_downs.iter().any(|drill| drill.id == source)
+                    })
+            })?;
+            let root = (source.unwrap_or(parent.id), root_index);
+            let mut retired = Vec::new();
+            if let Some(position) = parent
+                .drill_downs
+                .iter()
+                .position(|drill| drill.drill_root == Some(root))
+            {
+                retired.push(parent.drill_downs.remove(position));
+            }
+            if parent.drill_downs.len() == DRILL_DOWNS_PER_SNAPSHOT {
+                retired.push(parent.drill_downs.remove(0));
+            }
+            let id = crate::element_token::mint_snapshot_id();
+            parent.drill_downs.push(Snapshot {
+                id,
+                window_id,
+                screenshot_owner: None,
+                screenshot_scale: None,
+                screenshot_window_size: None,
+                zoom: None,
+                semantic: true,
+                payload,
+                drill_root: Some(root),
+                drill_downs: Vec::new(),
+            });
+            (id, retired)
+        };
+        let invalidated = retired.iter().map(|drill| drill.id).collect();
         drop(retired);
         Some((id, invalidated))
     }
@@ -604,9 +694,8 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         self.inner
             .lock()
             .unwrap()
-            .get(&pid)?
-            .iter()
-            .find(|entry| entry.id == snapshot_id)
+            .get(&pid)
+            .and_then(|lane| find_snapshot(lane, snapshot_id))
             .map(|entry| entry.window_id)
     }
 
@@ -640,7 +729,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
             .lock()
             .unwrap()
             .iter()
-            .find(|(_, lane)| lane.iter().any(|snapshot| snapshot.id == snapshot_id))
+            .find(|(_, lane)| find_snapshot(lane, snapshot_id).is_some())
             .map(|(pid, _)| *pid)
     }
 
@@ -660,7 +749,7 @@ impl<S: SnapshotPayload> SnapshotStore<S> {
         let lane = inner.get(&pid).map(Vec::as_slice).unwrap_or_default();
         let (snapshot, element_index) = match parse_token(token) {
             Some((snapshot_id, element_index)) => {
-                let Some(snapshot) = lane.iter().find(|snapshot| snapshot.id == snapshot_id) else {
+                let Some(snapshot) = find_snapshot(lane, snapshot_id) else {
                     return Err(stale_token_refusal(pid, lane));
                 };
                 (snapshot, element_index)
@@ -1309,6 +1398,115 @@ mod tests {
             .publish_for_session(10, LRU_CAP_PER_PID as u64, Payload(vec![]), None, None)
             .unwrap();
         assert_eq!(invalidated, vec![second]);
+    }
+
+    fn element(cache: &SnapshotStore<Payload>, token: String) -> Result<usize, ToolResult> {
+        match cache.resolve(10, &serde_json::json!({ "element_token": token }))? {
+            ResolvedElement::Element { element, .. } => Ok(element),
+            ResolvedElement::None => unreachable!("a token was passed"),
+        }
+    }
+
+    #[test]
+    fn drill_down_adds_tokens_without_staling_the_parent() {
+        let cache = SnapshotStore::new();
+        let parent = cache.publish(10, 20, Payload(vec![1, 2, 3]));
+        let (drill, invalidated) = cache
+            .publish_drill_down_for_session(10, 20, Some(parent), 2, Payload(vec![30, 31]), None)
+            .unwrap();
+        assert!(invalidated.is_empty(), "nothing is replaced");
+        assert_eq!(element(&cache, token_for(parent, 1)).unwrap(), 2);
+        assert_eq!(element(&cache, token_for(drill, 1)).unwrap(), 31);
+        assert_eq!(cache.window_for_snapshot(10, drill), Some(20));
+        let args = serde_json::json!({ "element_token": token_for(drill, 0) });
+        assert_eq!(cache.pid_for_token(&args), Some(10));
+        // A bare row number still names the window's own snapshot.
+        let bare = serde_json::json!({ "element_token": "1", "window_id": 20 });
+        assert!(matches!(
+            cache.resolve(10, &bare).unwrap(),
+            ResolvedElement::Element { element: 2, .. }
+        ));
+        // A drill-down's token is bound to its window like any other.
+        let conflicting =
+            serde_json::json!({ "element_token": token_for(drill, 0), "window_id": 21 });
+        assert!(cache.resolve(10, &conflicting).is_err());
+    }
+
+    #[test]
+    fn a_new_window_read_retires_the_parent_and_its_drill_downs() {
+        let cache = SnapshotStore::new();
+        let parent = cache.publish(10, 20, Payload(vec![1, 2, 3]));
+        let (drill, _) = cache
+            .publish_drill_down_for_session(10, 20, Some(parent), 0, Payload(vec![30]), None)
+            .unwrap();
+        let (_, invalidated) = cache
+            .publish_for_session(10, 20, Payload(vec![4]), None, None)
+            .unwrap();
+        assert_eq!(invalidated, vec![parent, drill]);
+        assert_eq!(
+            element(&cache, token_for(drill, 0))
+                .unwrap_err()
+                .structured_content
+                .unwrap()["refusal"]["code"],
+            "stale_element_token"
+        );
+        // A drill-down whose source was replaced during its walk is refused.
+        assert!(cache
+            .publish_drill_down_for_session(10, 20, Some(parent), 0, Payload(vec![30]), None)
+            .is_none());
+        assert!(cache
+            .publish_drill_down_for_session(10, 21, None, 0, Payload(vec![30]), None)
+            .is_none());
+    }
+
+    #[test]
+    fn drill_downs_replace_the_same_root_and_keep_a_bounded_set() {
+        let cache = SnapshotStore::new();
+        let parent = cache.publish(10, 20, Payload(vec![1, 2, 3, 4, 5, 6]));
+        let (first, _) = cache
+            .publish_drill_down_for_session(10, 20, Some(parent), 0, Payload(vec![30]), None)
+            .unwrap();
+        let (again, invalidated) = cache
+            .publish_drill_down_for_session(10, 20, None, 0, Payload(vec![31]), None)
+            .unwrap();
+        assert_eq!(invalidated, vec![first], "re-reading a root replaces it");
+        // Drilling from a drill-down attaches to the same window snapshot.
+        let (nested, invalidated) = cache
+            .publish_drill_down_for_session(10, 20, Some(again), 0, Payload(vec![32]), None)
+            .unwrap();
+        assert!(invalidated.is_empty());
+        assert_eq!(element(&cache, token_for(again, 0)).unwrap(), 31);
+        assert_eq!(element(&cache, token_for(nested, 0)).unwrap(), 32);
+        let mut retired = Vec::new();
+        for row in 1..=DRILL_DOWNS_PER_SNAPSHOT {
+            let (_, invalidated) = cache
+                .publish_drill_down_for_session(10, 20, Some(parent), row, Payload(vec![40]), None)
+                .unwrap();
+            retired.extend(invalidated);
+        }
+        assert_eq!(retired, vec![again, nested], "the oldest go first");
+        assert_eq!(element(&cache, token_for(parent, 5)).unwrap(), 6);
+    }
+
+    #[test]
+    fn drill_downs_end_with_their_session_and_never_publish_after_it() {
+        let cache = SnapshotStore::new();
+        let parent = cache
+            .publish_for_session(10, 20, Payload(vec![1]), Some("drill-ending"), Some(2.0))
+            .unwrap()
+            .0;
+        let (drill, _) = cache
+            .publish_drill_down_for_session(
+                10,
+                20,
+                Some(parent),
+                0,
+                Payload(vec![30]),
+                Some("drill-ending"),
+            )
+            .unwrap();
+        assert_eq!(cache.retire_session_screenshots("drill-ending"), 1);
+        assert!(element(&cache, token_for(drill, 0)).is_err());
     }
 
     #[test]
