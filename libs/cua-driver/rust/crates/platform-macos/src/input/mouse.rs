@@ -677,6 +677,26 @@ fn chromium_click_route_plan(
     steps
 }
 
+/// How long a single background tap in iPhone Mirroring holds the press.
+/// TikTok's Videos results ignored the recipe's 1 ms press (0 of 4 opened,
+/// and 80 or 120 ms did no better); 160 ms and more opened 4 of 4. Well
+/// under iOS's 500 ms long press, so nothing opens a context menu.
+const MIRRORING_TAP_HOLD_MS: u64 = 250;
+
+/// Hold a single Mirroring tap's press long enough for the phone to take it
+/// as a tap. A double tap keeps its short presses so it stays a double tap.
+fn hold_mirroring_tap(plan: &mut [ChromiumClickRouteStep], count: usize) {
+    if count != 1 {
+        return;
+    }
+    if let Some(down) = plan
+        .iter_mut()
+        .find(|step| step.kind == ChromiumClickEventKind::Down && step.phase == 3)
+    {
+        down.delay_after_ms = MIRRORING_TAP_HOLD_MS;
+    }
+}
+
 /// Post the route plan for the Chromium-compatible background left-click
 /// recipe. `CGEvent::new_mouse_event` starts with the screen-space location.
 /// `CGEventSetWindowLocation` carries the window-local point on macOS 27+ and
@@ -696,7 +716,7 @@ pub fn click_at_xy_chromium(
 
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
-    let route_plan = chromium_click_route_plan(
+    let mut route_plan = chromium_click_route_plan(
         screen_x,
         screen_y,
         win_local_x,
@@ -704,6 +724,9 @@ pub fn click_at_xy_chromium(
         count,
         window_location_is_window_local(),
     );
+    if crate::input::keyboard::is_iphone_mirroring_pid(pid) {
+        hold_mirroring_tap(&mut route_plan, count);
+    }
     let flags = parse_modifier_flags(modifiers);
     let window_id = wid as i64;
 
@@ -1784,9 +1807,18 @@ pub fn scroll_wheel_at_xy(
     delta_x_per_tick: i32,
     ticks: usize,
 ) -> anyhow::Result<()> {
-    if let (true, Some(local), Some(wid)) = (pixel_wheel_target(pid), window_local, wid) {
-        anchor_mirroring_scroll(pid, (screen_x, screen_y), local, wid)?;
-    }
+    // iPhone Mirroring scrolls where the pointer last pressed: press at the
+    // target and release right after the first wheel event (see
+    // `MirroringScrollAim`).
+    let mut aim = match (pixel_wheel_target(pid), window_local, wid) {
+        (true, Some(local), Some(wid)) => Some(MirroringScrollAim::press(
+            pid,
+            (screen_x, screen_y),
+            local,
+            wid,
+        )?),
+        _ => None,
+    };
 
     // Prime AppKit/WebKit's tracking state at the target before the wheel
     // gesture. Background windows can retain a stale hit-test location; a
@@ -1856,6 +1888,9 @@ pub fn scroll_wheel_at_xy(
             crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, false);
             event.post_to_pid(pid as libc::pid_t);
 
+            if let Some(aim) = aim.take() {
+                aim.release()?;
+            }
             std::thread::sleep(std::time::Duration::from_millis(if parts > 1 {
                 16
             } else {
@@ -1866,60 +1901,67 @@ pub fn scroll_wheel_at_xy(
     Ok(())
 }
 
-/// How far (points) the anchor press of a Mirroring scroll is released from
-/// where it went down: past the movement a tap allows, so it never activates
-/// what is under it.
-const MIRRORING_ANCHOR_RELEASE_PT: f64 = 200.0;
-
-/// Where the anchor press for a Mirroring scroll at window-local `y` is
-/// released, as a vertical offset: toward the farther window edge, so the
-/// release stays inside the window.
-fn mirroring_anchor_release_offset(local_y: f64) -> f64 {
-    if local_y >= MIRRORING_ANCHOR_RELEASE_PT + 50.0 {
-        -MIRRORING_ANCHOR_RELEASE_PT
-    } else {
-        MIRRORING_ANCHOR_RELEASE_PT
-    }
-}
-
-/// Point iPhone Mirroring's scrolls at `screen`/`local` without tapping.
+/// The press that aims a background scroll in iPhone Mirroring.
 ///
 /// Mirroring does not scroll at a wheel event's location: it scrolls where
-/// the pointer last went down, and it only follows the real pointer's hover.
-/// In the background the last press is wherever the agent last tapped, so
-/// after a tap on a fixed header (TikTok's search tabs) every scroll went to
-/// the header and the results never moved. A press at the target released
-/// far outside a tap's allowed movement moves that point without activating
-/// anything: Mirroring forwards the press and the release, not the motion.
-fn anchor_mirroring_scroll(
+/// the pointer last went down (a real pointer's hover also counts, and a
+/// background pointer never hovers). After a background tap on a fixed
+/// header (TikTok's search tabs) every scroll went to the header and the
+/// results never moved. So the scroll presses at its target first.
+///
+/// The press must not tap. Mirroring ignores where a press is released, so
+/// releasing far away still tapped a list row. What cancels it is the scroll
+/// itself: the press is lifted 10 ms after it went down, just after the
+/// first wheel event, so the content starts scrolling under the finger.
+/// Live on TikTok: Top tab tiles, Videos tab tiles and ads, and Users rows
+/// all scrolled and none opened.
+struct MirroringScrollAim {
     pid: i32,
     screen: (f64, f64),
     local: (f64, f64),
     wid: u32,
-) -> anyhow::Result<()> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // Like a background click, make the window take the press without
-    // raising it. Once the user's own clicks have moved key status to another
-    // app, Mirroring drops a press that skips this, and the scroll goes back
-    // to wherever the last accepted press was.
-    prepare_background_pixel_click(pid, wid);
-    let dy = mirroring_anchor_release_offset(local.1);
-    let stamp_local = window_location_is_window_local();
-    let gesture = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as i64;
-    let route = post_route(MousePostMode::SkyLightPreferred, skylight_available());
-    let post = |event_type: CGEventType, offset: f64, phase: i64, click_state: i64| {
-        let point = CGPoint::new(screen.0, screen.1 + offset);
+    gesture: i64,
+}
+
+impl MirroringScrollAim {
+    /// Make the window take input without raising it, then press at the
+    /// target. Without the focus step a press after the user clicked in
+    /// another app is dropped and the scroll goes to the old point.
+    fn press(pid: i32, screen: (f64, f64), local: (f64, f64), wid: u32) -> anyhow::Result<Self> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        prepare_background_pixel_click(pid, wid);
+        let aim = Self {
+            pid,
+            screen,
+            local,
+            wid,
+            gesture: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as i64,
+        };
+        aim.post(CGEventType::MouseMoved, 2, 0)?;
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        aim.post(CGEventType::LeftMouseDown, 3, 1)?;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        Ok(aim)
+    }
+
+    /// Lift the press, right after the first wheel event of the scroll.
+    fn release(self) -> anyhow::Result<()> {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        self.post(CGEventType::LeftMouseUp, 3, 1)
+    }
+
+    fn post(&self, event_type: CGEventType, phase: i64, click_state: i64) -> anyhow::Result<()> {
         let event = CGEvent::new_mouse_event(
             CGEventSource::new(CGEventSourceStateID::HIDSystemState)
                 .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?,
             event_type,
-            point,
+            CGPoint::new(self.screen.0, self.screen.1),
             CGMouseButton::Left,
         )
-        .map_err(|_| anyhow::anyhow!("Mirroring scroll anchor event creation failed"))?;
+        .map_err(|_| anyhow::anyhow!("Mirroring scroll press event creation failed"))?;
         let ptr = event.as_ptr() as *mut std::ffi::c_void;
         let set =
             |field: u32, value: i64| crate::input::skylight::set_integer_field(ptr, field, value);
@@ -1927,28 +1969,25 @@ fn anchor_mirroring_scroll(
         set(1, click_state);
         set(3, 0);
         set(7, 3);
-        set(40, pid as i64);
-        set(51, wid as i64);
-        set(91, wid as i64);
-        set(92, wid as i64);
-        set(58, gesture);
-        let (wx, wy) = if stamp_local {
-            (local.0, local.1 + offset)
+        set(40, self.pid as i64);
+        set(51, self.wid as i64);
+        set(91, self.wid as i64);
+        set(92, self.wid as i64);
+        set(58, self.gesture);
+        let (wx, wy) = if window_location_is_window_local() {
+            self.local
         } else {
-            (point.x, point.y)
+            self.screen
         };
         crate::input::skylight::set_window_location(ptr, wx, wy);
         set_explicit_flags(&event, CGEventFlags::CGEventFlagNull);
-        dispatch_mouse_event(route, pid, &event);
-        Ok::<(), anyhow::Error>(())
-    };
-    post(CGEventType::MouseMoved, 0.0, 2, 0)?;
-    std::thread::sleep(std::time::Duration::from_millis(15));
-    post(CGEventType::LeftMouseDown, 0.0, 3, 1)?;
-    std::thread::sleep(std::time::Duration::from_millis(30));
-    post(CGEventType::LeftMouseUp, dy, 3, 1)?;
-    std::thread::sleep(std::time::Duration::from_millis(60));
-    Ok(())
+        dispatch_mouse_event(
+            post_route(MousePostMode::SkyLightPreferred, skylight_available()),
+            self.pid,
+            &event,
+        );
+        Ok(())
+    }
 }
 
 /// Pixel wheel events one notch is split into for a pixel-scrolled target.
@@ -2586,15 +2625,20 @@ mod tests {
     }
 
     #[test]
-    fn the_mirroring_scroll_anchor_is_released_inside_the_window_and_far_away() {
-        assert_eq!(
-            mirroring_anchor_release_offset(500.0),
-            -MIRRORING_ANCHOR_RELEASE_PT
-        );
-        assert_eq!(
-            mirroring_anchor_release_offset(100.0),
-            MIRRORING_ANCHOR_RELEASE_PT
-        );
+    fn a_single_mirroring_tap_holds_its_press_and_a_double_tap_does_not() {
+        let mut single = chromium_click_route_plan(10.0, 10.0, 1.0, 1.0, 1, true);
+        hold_mirroring_tap(&mut single, 1);
+        let held: Vec<_> = single
+            .iter()
+            .filter(|step| step.delay_after_ms == MIRRORING_TAP_HOLD_MS)
+            .map(|step| (step.kind, step.phase))
+            .collect();
+        assert_eq!(held, [(ChromiumClickEventKind::Down, 3)]);
+
+        let mut double = chromium_click_route_plan(10.0, 10.0, 1.0, 1.0, 2, true);
+        let before = double.clone();
+        hold_mirroring_tap(&mut double, 2);
+        assert_eq!(double, before);
     }
 
     #[test]
