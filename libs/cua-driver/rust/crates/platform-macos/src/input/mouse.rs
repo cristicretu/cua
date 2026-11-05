@@ -1784,6 +1784,10 @@ pub fn scroll_wheel_at_xy(
     delta_x_per_tick: i32,
     ticks: usize,
 ) -> anyhow::Result<()> {
+    if let (true, Some(local), Some(wid)) = (pixel_wheel_target(pid), window_local, wid) {
+        anchor_mirroring_scroll(pid, (screen_x, screen_y), local, wid)?;
+    }
+
     // Prime AppKit/WebKit's tracking state at the target before the wheel
     // gesture. Background windows can retain a stale hit-test location; a
     // nested overflow scroller then receives the wheel nowhere even though
@@ -1859,6 +1863,86 @@ pub fn scroll_wheel_at_xy(
             }));
         }
     }
+    Ok(())
+}
+
+/// How far (points) the anchor press of a Mirroring scroll is released from
+/// where it went down: past the movement a tap allows, so it never activates
+/// what is under it.
+const MIRRORING_ANCHOR_RELEASE_PT: f64 = 200.0;
+
+/// Where the anchor press for a Mirroring scroll at window-local `y` is
+/// released, as a vertical offset: toward the farther window edge, so the
+/// release stays inside the window.
+fn mirroring_anchor_release_offset(local_y: f64) -> f64 {
+    if local_y >= MIRRORING_ANCHOR_RELEASE_PT + 50.0 {
+        -MIRRORING_ANCHOR_RELEASE_PT
+    } else {
+        MIRRORING_ANCHOR_RELEASE_PT
+    }
+}
+
+/// Point iPhone Mirroring's scrolls at `screen`/`local` without tapping.
+///
+/// Mirroring does not scroll at a wheel event's location: it scrolls where
+/// the pointer last went down, and it only follows the real pointer's hover.
+/// In the background the last press is wherever the agent last tapped, so
+/// after a tap on a fixed header (TikTok's search tabs) every scroll went to
+/// the header and the results never moved. A press at the target released
+/// far outside a tap's allowed movement moves that point without activating
+/// anything: Mirroring forwards the press and the release, not the motion.
+fn anchor_mirroring_scroll(
+    pid: i32,
+    screen: (f64, f64),
+    local: (f64, f64),
+    wid: u32,
+) -> anyhow::Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dy = mirroring_anchor_release_offset(local.1);
+    let stamp_local = window_location_is_window_local();
+    let gesture = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as i64;
+    let route = post_route(MousePostMode::SkyLightPreferred, skylight_available());
+    let post = |event_type: CGEventType, offset: f64, phase: i64, click_state: i64| {
+        let point = CGPoint::new(screen.0, screen.1 + offset);
+        let event = CGEvent::new_mouse_event(
+            CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+                .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?,
+            event_type,
+            point,
+            CGMouseButton::Left,
+        )
+        .map_err(|_| anyhow::anyhow!("Mirroring scroll anchor event creation failed"))?;
+        let ptr = event.as_ptr() as *mut std::ffi::c_void;
+        let set =
+            |field: u32, value: i64| crate::input::skylight::set_integer_field(ptr, field, value);
+        set(0, phase);
+        set(1, click_state);
+        set(3, 0);
+        set(7, 3);
+        set(40, pid as i64);
+        set(51, wid as i64);
+        set(91, wid as i64);
+        set(92, wid as i64);
+        set(58, gesture);
+        let (wx, wy) = if stamp_local {
+            (local.0, local.1 + offset)
+        } else {
+            (point.x, point.y)
+        };
+        crate::input::skylight::set_window_location(ptr, wx, wy);
+        set_explicit_flags(&event, CGEventFlags::CGEventFlagNull);
+        dispatch_mouse_event(route, pid, &event);
+        Ok::<(), anyhow::Error>(())
+    };
+    post(CGEventType::MouseMoved, 0.0, 2, 0)?;
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    post(CGEventType::LeftMouseDown, 0.0, 3, 1)?;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    post(CGEventType::LeftMouseUp, dy, 3, 1)?;
+    std::thread::sleep(std::time::Duration::from_millis(60));
     Ok(())
 }
 
@@ -2494,6 +2578,18 @@ mod tests {
             .collect();
         assert_eq!(drags.len(), 1);
         assert_eq!(drags[0].point, (10.0, 0.0));
+    }
+
+    #[test]
+    fn the_mirroring_scroll_anchor_is_released_inside_the_window_and_far_away() {
+        assert_eq!(
+            mirroring_anchor_release_offset(500.0),
+            -MIRRORING_ANCHOR_RELEASE_PT
+        );
+        assert_eq!(
+            mirroring_anchor_release_offset(100.0),
+            MIRRORING_ANCHOR_RELEASE_PT
+        );
     }
 
     #[test]

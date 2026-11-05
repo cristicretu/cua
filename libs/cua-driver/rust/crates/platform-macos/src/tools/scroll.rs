@@ -73,6 +73,7 @@ fn def() -> &'static ToolDef {
             - Keystroke: no target, just pid + direction. PageDown/PageUp (by='page') or arrows (by='line') on the focused scroller.\n\
             \n\
             Electron/Chromium windows drop background wheel events: there a background scroll reveals the content just past the edge of the scroll container under the target through accessibility (about `amount` notches); `delivery_mode:\"foreground\"` is the fallback.\n\
+            iPhone Mirroring: pass `x, y` over the list or feed to scroll. The phone scrolls where the pointer last pressed, so the driver first re-points it there with a press released far away (it activates nothing); a keystroke scroll does not move the phone.\n\
             `amount` is wheel notches (targeted) or key repetitions (keystroke).".into(),
         input_schema: serde_json::json!({
             "type": "object",
