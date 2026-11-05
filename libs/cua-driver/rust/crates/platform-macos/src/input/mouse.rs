@@ -1898,6 +1898,11 @@ fn anchor_mirroring_scroll(
     wid: u32,
 ) -> anyhow::Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
+    // Like a background click, make the window take the press without
+    // raising it. Once the user's own clicks have moved key status to another
+    // app, Mirroring drops a press that skips this, and the scroll goes back
+    // to wherever the last accepted press was.
+    prepare_background_pixel_click(pid, wid);
     let dy = mirroring_anchor_release_offset(local.1);
     let stamp_local = window_location_is_window_local();
     let gesture = SystemTime::now()
