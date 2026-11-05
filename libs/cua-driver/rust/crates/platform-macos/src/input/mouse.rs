@@ -1784,8 +1784,6 @@ pub fn scroll_wheel_at_xy(
     delta_x_per_tick: i32,
     ticks: usize,
 ) -> anyhow::Result<()> {
-    use core_graphics::event::ScrollEventUnit;
-
     // Prime AppKit/WebKit's tracking state at the target before the wheel
     // gesture. Background windows can retain a stale hit-test location; a
     // nested overflow scroller then receives the wheel nowhere even though
@@ -1815,42 +1813,87 @@ pub fn scroll_wheel_at_xy(
         // wheel_count = 2 → both axes carried (vertical = wheel1/axis-1,
         // horizontal = wheel2/axis-2). Convert the driver's pixel-tuned step
         // into a bounded line delta for the event API.
-        let wheel_y = (delta_y_per_tick / 120).clamp(-10, 10);
-        let wheel_x = (delta_x_per_tick / 120).clamp(-10, 10);
-        let event =
-            CGEvent::new_scroll_event(source, ScrollEventUnit::LINE, 2, wheel_y, wheel_x, 0)
+        let (units, wheel_y, wheel_x, parts) =
+            wheel_event_deltas(delta_y_per_tick, delta_x_per_tick, pixel_wheel_target(pid));
+        for part in 0..parts {
+            let source = if part == 0 {
+                source.clone()
+            } else {
+                CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+                    .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?
+            };
+            let event = CGEvent::new_scroll_event(source, units, 2, wheel_y, wheel_x, 0)
                 .map_err(|_| anyhow::anyhow!("CGEvent::new_scroll_event failed"))?;
 
-        let event_ptr = event.as_ptr() as *mut std::ffi::c_void;
+            let event_ptr = event.as_ptr() as *mut std::ffi::c_void;
 
-        // Anchor the event at the target screen point so the renderer's wheel
-        // hit-test routes the scroll to the element under the cursor.
-        unsafe { CGEventSetLocation(event_ptr, screen_x, screen_y) };
+            // Anchor the event at the target screen point so the renderer's wheel
+            // hit-test routes the scroll to the element under the cursor.
+            unsafe { CGEventSetLocation(event_ptr, screen_x, screen_y) };
 
-        // Background-delivery stamps (mirror post_mouse_event).
-        if let Some((wx, wy)) = window_local {
-            crate::input::skylight::set_window_location(event_ptr, wx, wy);
+            // Background-delivery stamps (mirror post_mouse_event).
+            if let Some((wx, wy)) = window_local {
+                crate::input::skylight::set_window_location(event_ptr, wx, wy);
+            }
+            if let Some(wid) = wid {
+                let window_id = wid as i64;
+                let set = |f: u32, v: i64| {
+                    crate::input::skylight::set_integer_field(event_ptr, f, v);
+                };
+                set(51, window_id); // windowNumber
+                set(91, window_id); // kCGMouseEventWindowUnderMousePointer
+                set(92, window_id); // ...ThatCanHandleThisEvent
+            }
+            // f40 = target pid (Chromium synthetic-event filter).
+            crate::input::skylight::set_integer_field(event_ptr, 40, pid as i64);
+
+            // Belt+suspenders post: SkyLight reaches backgrounded Chromium/Catalyst;
+            // the public path lands on AppKit/WKWebView. Mouse-class → no auth envelope.
+            crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, false);
+            event.post_to_pid(pid as libc::pid_t);
+
+            std::thread::sleep(std::time::Duration::from_millis(if parts > 1 {
+                16
+            } else {
+                30
+            }));
         }
-        if let Some(wid) = wid {
-            let window_id = wid as i64;
-            let set = |f: u32, v: i64| {
-                crate::input::skylight::set_integer_field(event_ptr, f, v);
-            };
-            set(51, window_id); // windowNumber
-            set(91, window_id); // kCGMouseEventWindowUnderMousePointer
-            set(92, window_id); // ...ThatCanHandleThisEvent
-        }
-        // f40 = target pid (Chromium synthetic-event filter).
-        crate::input::skylight::set_integer_field(event_ptr, 40, pid as i64);
-
-        // Belt+suspenders post: SkyLight reaches backgrounded Chromium/Catalyst;
-        // the public path lands on AppKit/WKWebView. Mouse-class → no auth envelope.
-        crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, false);
-        event.post_to_pid(pid as libc::pid_t);
-
-        std::thread::sleep(std::time::Duration::from_millis(30));
     }
     Ok(())
+}
+
+/// Pixel wheel events one notch is split into for a pixel-scrolled target.
+const PIXEL_WHEEL_PARTS: i32 = 4;
+
+/// Whether `pid` scrolls by a wheel event's pixel delta rather than its line
+/// count. iPhone Mirroring turns a wheel event into a finger scroll of its
+/// pixel delta, which for a line-unit event is a couple of points: ten
+/// notches moved a list about 24 points, so an agent could not page through
+/// a feed. Pixel-unit events of the same notch size scroll like a trackpad.
+fn pixel_wheel_target(pid: i32) -> bool {
+    crate::input::keyboard::is_iphone_mirroring_pid(pid)
+}
+
+/// The unit, per-event deltas and event count for one wheel notch of
+/// `delta_y`/`delta_x` pixels: one line event by default, or the notch split
+/// into equal pixel events for a pixel-scrolled target.
+fn wheel_event_deltas(delta_y: i32, delta_x: i32, pixel: bool) -> (u32, i32, i32, i32) {
+    use core_graphics::event::ScrollEventUnit;
+    if pixel {
+        (
+            ScrollEventUnit::PIXEL,
+            delta_y / PIXEL_WHEEL_PARTS,
+            delta_x / PIXEL_WHEEL_PARTS,
+            PIXEL_WHEEL_PARTS,
+        )
+    } else {
+        (
+            ScrollEventUnit::LINE,
+            (delta_y / 120).clamp(-10, 10),
+            (delta_x / 120).clamp(-10, 10),
+            1,
+        )
+    }
 }
 
 extern "C" {
@@ -2451,6 +2494,19 @@ mod tests {
             .collect();
         assert_eq!(drags.len(), 1);
         assert_eq!(drags[0].point, (10.0, 0.0));
+    }
+
+    #[test]
+    fn mirroring_scrolls_by_pixels_and_other_apps_by_lines() {
+        use core_graphics::event::ScrollEventUnit;
+        assert_eq!(
+            wheel_event_deltas(-120, 0, true),
+            (ScrollEventUnit::PIXEL, -30, 0, PIXEL_WHEEL_PARTS)
+        );
+        assert_eq!(
+            wheel_event_deltas(-600, 120, false),
+            (ScrollEventUnit::LINE, -5, 1, 1)
+        );
     }
 
     #[test]
