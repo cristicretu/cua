@@ -898,10 +898,15 @@ pub(crate) async fn focus_by_pixel(
     mutation_lease: Option<&BackgroundMutationLease>,
 ) -> Result<(), cua_driver_core::protocol::ToolResult> {
     use cua_driver_core::tool::Tool;
+    // iPhone Mirroring shows a phone screen with no accessibility tree: its
+    // focused element is the whole window, which "holds" every point, and an
+    // AX focus action reaches nothing. The phone's field is focused by a real
+    // (background) tap, which also arms the app to forward keys.
+    let mirroring = crate::input::keyboard::is_iphone_mirroring_pid(pid);
     let mut click_args = serde_json::json!({
         "pid": pid, "x": x, "y": y,
         "delivery_mode": "background",
-        "action": "focus",
+        "action": if mirroring { "press" } else { "focus" },
     });
     if let Some(wid) = window_id {
         click_args["window_id"] = serde_json::json!(wid);
@@ -920,7 +925,7 @@ pub(crate) async fn focus_by_pixel(
     // click fallback would be destructive: Chromium's omnibox hit-tests to an
     // enclosing AXGroup that rejects AXFocused, so the fallback click moved
     // the caret and dropped the selection (#4125).
-    if focused_element_holds_point(pid, window_id, x, y, true).await {
+    if !mirroring && focused_element_holds_point(pid, window_id, x, y, true).await {
         return Ok(());
     }
     if let Some(ref s) = session {

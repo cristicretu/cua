@@ -46,13 +46,31 @@ pub fn is_screen_sharing_pid(pid: i32) -> bool {
         .is_some_and(is_screen_sharing_bundle_id)
 }
 
-/// Apps that hand each background key to a simulated device as a HID usage:
-/// Simulator, and Xcode 27's Device Hub, which hosts the same simulators.
-/// Like Screen Sharing they read the virtual keycode and ignore the Unicode
-/// payload, so the ordinary keycode-0 text events all arrive as "a". Unlike
-/// Screen Sharing they accept PID-routed events in the background.
-const KEYCODE_FORWARDER_BUNDLE_IDS: &[&str] =
-    &["com.apple.iphonesimulator", "com.apple.dt.Devices"];
+/// Apps that hand each background key to a device as a HID usage: Simulator,
+/// Xcode 27's Device Hub, which hosts the same simulators, and iPhone
+/// Mirroring, which forwards to a real iPhone. Like Screen Sharing they read
+/// the virtual keycode and ignore the Unicode payload, so the ordinary
+/// keycode-0 text events arrive as "a" or not at all. Unlike Screen Sharing
+/// they accept PID-routed events in the background.
+///
+/// iPhone Mirroring forwards keys only after a click in its window: a
+/// background pixel click (whose focus-without-raise prologue it needs) arms
+/// it, and keys then reach whatever that click focused on the phone, with the
+/// person's app still in front. A focus record alone does not arm it.
+const KEYCODE_FORWARDER_BUNDLE_IDS: &[&str] = &[
+    "com.apple.iphonesimulator",
+    "com.apple.dt.Devices",
+    IPHONE_MIRRORING_BUNDLE_ID,
+];
+
+/// iPhone Mirroring's bundle id.
+pub const IPHONE_MIRRORING_BUNDLE_ID: &str = "com.apple.ScreenContinuity";
+
+/// Whether `pid` is iPhone Mirroring, whose window shows a phone screen with
+/// no accessibility tree: there is never a focused text input to find.
+pub fn is_iphone_mirroring_pid(pid: i32) -> bool {
+    crate::apps::bundle_id_for_pid(pid).as_deref() == Some(IPHONE_MIRRORING_BUNDLE_ID)
+}
 
 fn is_keycode_forwarder_bundle_id(bundle_id: &str) -> bool {
     KEYCODE_FORWARDER_BUNDLE_IDS.contains(&bundle_id)
@@ -616,7 +634,7 @@ enum PhysicalEventType {
 fn physical_text_events(ch: char) -> anyhow::Result<Vec<PhysicalTextEvent>> {
     let (key_code, shift) = physical_key_for_char(ch).ok_or_else(|| {
         anyhow::anyhow!(
-            "This app forwards physical keys (Screen Sharing, Simulator, Device Hub), and \
+            "This app forwards physical keys (Screen Sharing, Simulator, Device Hub, iPhone Mirroring), and \
              character U+{:04X} has no key on the US layout. Nothing was typed; use \
              set_value on the field instead.",
             ch as u32
@@ -1171,6 +1189,7 @@ mod tests {
     fn simulator_and_device_hub_forward_keycodes() {
         assert!(is_keycode_forwarder_bundle_id("com.apple.iphonesimulator"));
         assert!(is_keycode_forwarder_bundle_id("com.apple.dt.Devices"));
+        assert!(is_keycode_forwarder_bundle_id("com.apple.ScreenContinuity"));
         assert!(!is_keycode_forwarder_bundle_id("com.apple.dt.Xcode"));
         assert!(!is_keycode_forwarder_bundle_id("com.apple.ScreenSharing"));
     }

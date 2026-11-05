@@ -59,7 +59,7 @@ fn def() -> &'static ToolDef {
         name: "type_text".into(),
         description: "Insert text via `AXSetAttribute(kAXSelectedText)` into the element given by `element_token`, or the pid's focused element. Does not press keys: use `press_key` / `hotkey` for Return, Escape, arrows. If AX insertion is unsupported (Chromium/Electron), it falls back to CGEvent typing when the route fits the transport budget; longer routes are refused with a safe chunk size.\n\
             \n\
-            Web content (browser tabs, Slack, VS Code): AXValue is not proof the DOM saw the text, so the result is `effect:\"unverifiable\"` and Electron web content refuses background delivery. For a browser tab use the `page` tool. For an embedded web view pass `x, y` (no element_token) to pixel-click the field then type in one call; a pixel click will not reliably open a closed control, so AX-press it open first. Confirm from the screenshot, and use `delivery_mode:\"foreground\"` only if background still drops the text.".into(),
+            Web content (browser tabs, Slack, VS Code): AXValue is not proof the DOM saw the text, so the result is `effect:\"unverifiable\"` and Electron web content refuses background delivery. For a browser tab use the `page` tool. For an embedded web view pass `x, y` (no element_token) to pixel-click the field then type in one call; a pixel click will not reliably open a closed control, so AX-press it open first. Confirm from the screenshot, and use `delivery_mode:\"foreground\"` only if background still drops the text.\n\niPhone Mirroring: the phone screen has no accessibility tree, so pass x, y of the field (or click it first); keys then go to what that tap focused on the phone, in the background. US-layout characters only.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "required": ["text"],
@@ -1694,7 +1694,7 @@ fn type_text_in_key_window(
             // No focused element, but the window is the confirmed key window:
             // post the keys to it, as press_key does.
             None => unfocused_window_accepts_keys(key_window_confirmed, &bundle_id_of(pid)),
-        };
+        } || crate::input::keyboard::is_iphone_mirroring_pid(pid);
         if !accepts_text {
             if let Some((element, true, _)) = ax_target {
                 unsafe { CFRelease(element as _) };
