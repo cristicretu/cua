@@ -11,7 +11,7 @@
 //! Every read goes through the registry like any direct read, so each poll
 //! passes the same session, policy and approval checks. The tool itself is
 //! read-only: it takes no desktop input lane and no mutation lease, and polls
-//! no faster than [`locate::POLL_INTERVAL`]. Its polls publish no snapshot,
+//! no faster than [`POLL_INTERVAL`]. Its polls publish no snapshot,
 //! so the caller's element tokens stay current while it waits and after it
 //! times out; only an element wait that holds makes one ordinary read, to
 //! return the matched element's `element_token` (that read replaces the
@@ -30,6 +30,12 @@ use crate::{
     recording_tools::ReplayRegistrySlot,
     tool::{Tool, ToolDef},
 };
+
+/// Pause between two reads of a standalone wait. Every read is a full
+/// accessibility walk through the registry, so polling faster only loads the
+/// target app. (A batch's `wait_for`/`expect` checks poll at
+/// [`locate::POLL_INTERVAL`].)
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Public name of the tool, and of the run_steps step that runs one.
 pub const WAIT_TOOL: &str = "wait";
@@ -364,7 +370,7 @@ async fn with_fresh_token(locator: &Locator<'_>, wait: &Wait, mut waited: Waited
     waited
 }
 
-/// Poll `once` every [`locate::POLL_INTERVAL`] until it holds, fails for a
+/// Poll `once` every [`POLL_INTERVAL`] until it holds, fails for a
 /// reason waiting cannot fix, or `deadline` passes.
 async fn poll<F, Fut>(started: Instant, deadline: Instant, mut once: F) -> Result<Waited, Failed>
 where
@@ -379,7 +385,7 @@ where
             }
             Err(miss) if !miss.worth_waiting() => return Err(Failed::from_miss(miss, started)),
             Err(miss) => {
-                if Instant::now() + locate::POLL_INTERVAL > deadline {
+                if Instant::now() + POLL_INTERVAL > deadline {
                     let mut failed = Failed::from_miss(miss, started);
                     failed.message = format!(
                         "{} (checked for {} ms)",
@@ -388,7 +394,7 @@ where
                     );
                     return Err(failed);
                 }
-                tokio::time::sleep(locate::POLL_INTERVAL).await;
+                tokio::time::sleep(POLL_INTERVAL).await;
             }
         }
     }
@@ -689,7 +695,7 @@ impl Tool for WaitTool {
             .and_then(Value::as_str)
             .map(str::to_owned);
         // The locator's own stop leaves room for the last poll's read.
-        let deadline = Instant::now() + wait.timeout + locate::POLL_INTERVAL;
+        let deadline = Instant::now() + wait.timeout + POLL_INTERVAL;
         let observer = Locator::new(&registry, session.clone(), deadline).observing();
         let outcome = match run(&observer, &wait, &WindowSpec::default()).await {
             Ok(waited) => {
