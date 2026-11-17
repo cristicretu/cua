@@ -195,8 +195,10 @@ impl Tool for CloseAppTool {
         &self,
         adapter_id: &str,
         args: &Value,
-    ) -> Result<Option<Value>, String> {
-        super::kill_app::process_control_scope("close_app", adapter_id, args).await
+    ) -> Result<Option<Value>, cua_driver_core::tool::ProtectedResourceScopeError> {
+        super::kill_app::process_control_scope("close_app", adapter_id, args)
+            .await
+            .map_err(Into::into)
     }
 
     async fn invoke(&self, args: Value) -> ToolResult {

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! Internal, non-wire representation of what an action actually did.
 //!
 //! This deliberately has no serde derives: it is the driver's source of truth,
@@ -461,6 +464,7 @@ impl ActionExecutionRecord {
             hint: None,
             next_call: None,
             disposition: None,
+            fast_path: None,
         })
     }
 
@@ -800,6 +804,9 @@ fn transport_from_legacy(
             ActionTransport::LinuxCuaCompositorInject
         }
         "hid" | "cgevent_hid" | "cgevent_fg" => ActionTransport::MacosCgEventHid,
+        // A GTK 3 app held AppKit-active by the activation event, with the
+        // click posted to its pid as NSEvent-built events.
+        "appkit_activated" => ActionTransport::MacosCgEventPid,
         "cgevent" => {
             if args
                 .get("delivery_mode")
@@ -2083,6 +2090,7 @@ mod tests {
             "cgevent_hid",
             "cgevent",
             "cgevent_fg",
+            "appkit_activated",
             "dom_event",
             "trusted",
             "key_events",

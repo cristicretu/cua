@@ -1535,214 +1535,9 @@ class _UniffiFfiConverterOptionalTypeActionNextCall(_UniffiConverterRustBuffer):
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
-
-
-
-
-
-class DeliveryDisposition(enum.Enum):
-    """
-    How far a call's input got. The vocabulary follows agent-desktop's
-    `docs/json-output.md` "Disposition values" (Apache-2.0).
-"""
-
-    UNKNOWN = 0
-    """
-    Nothing is known about delivery: an error with no evidence either way.
-"""
-
-    NOT_DELIVERED = 1
-    """
-    Nothing reached the app: a refusal, invalid arguments, a read.
-"""
-
-    DELIVERY_UNCERTAIN = 2
-    """
-    Input was sent and the app answered with an error, or only part of it
-    landed. It may have acted.
-"""
-
-    DELIVERED_UNVERIFIED = 3
-    """
-    Input was sent and nothing confirmed its effect.
-"""
-
-    DELIVERED_VERIFIED = 4
-    """
-    Input was sent and a readback confirmed its effect.
-"""
-
-
-
-class _UniffiFfiConverterTypeDeliveryDisposition(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return DeliveryDisposition.UNKNOWN
-        if variant == 2:
-            return DeliveryDisposition.NOT_DELIVERED
-        if variant == 3:
-            return DeliveryDisposition.DELIVERY_UNCERTAIN
-        if variant == 4:
-            return DeliveryDisposition.DELIVERED_UNVERIFIED
-        if variant == 5:
-            return DeliveryDisposition.DELIVERED_VERIFIED
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == DeliveryDisposition.UNKNOWN:
-            return
-        if value == DeliveryDisposition.NOT_DELIVERED:
-            return
-        if value == DeliveryDisposition.DELIVERY_UNCERTAIN:
-            return
-        if value == DeliveryDisposition.DELIVERED_UNVERIFIED:
-            return
-        if value == DeliveryDisposition.DELIVERED_VERIFIED:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == DeliveryDisposition.UNKNOWN:
-            buf.write_i32(1)
-        if value == DeliveryDisposition.NOT_DELIVERED:
-            buf.write_i32(2)
-        if value == DeliveryDisposition.DELIVERY_UNCERTAIN:
-            buf.write_i32(3)
-        if value == DeliveryDisposition.DELIVERED_UNVERIFIED:
-            buf.write_i32(4)
-        if value == DeliveryDisposition.DELIVERED_VERIFIED:
-            buf.write_i32(5)
-
-
-
-
-
-
-
-
-class RetryDisposition(enum.Enum):
-    """
-    Whether the same call may be repeated without first reading the app.
-"""
-
-    UNKNOWN = 0
-
-    SAFE = 1
-    """
-    Nothing was delivered, so a retry cannot double-fire.
-"""
-
-    UNSAFE = 2
-    """
-    Something may have landed: read the app before repeating anything.
-"""
-
-
-
-class _UniffiFfiConverterTypeRetryDisposition(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return RetryDisposition.UNKNOWN
-        if variant == 2:
-            return RetryDisposition.SAFE
-        if variant == 3:
-            return RetryDisposition.UNSAFE
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == RetryDisposition.UNKNOWN:
-            return
-        if value == RetryDisposition.SAFE:
-            return
-        if value == RetryDisposition.UNSAFE:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == RetryDisposition.UNKNOWN:
-            buf.write_i32(1)
-        if value == RetryDisposition.SAFE:
-            buf.write_i32(2)
-        if value == RetryDisposition.UNSAFE:
-            buf.write_i32(3)
-
-
-
-@dataclass
-class Disposition:
-    """
-    `{delivery, retry}` on a call's structured result.
-"""
-    def __init__(self, *, delivery:DeliveryDisposition, retry:RetryDisposition):
-        self.delivery = delivery
-        self.retry = retry
-
-
-
-
-    def __str__(self):
-        return "Disposition(delivery={}, retry={})".format(self.delivery, self.retry)
-    def __eq__(self, other):
-        if self.delivery != other.delivery:
-            return False
-        if self.retry != other.retry:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeDisposition(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return Disposition(
-            delivery=_UniffiFfiConverterTypeDeliveryDisposition.read(buf),
-            retry=_UniffiFfiConverterTypeRetryDisposition.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterTypeDeliveryDisposition.check_lower(value.delivery)
-        _UniffiFfiConverterTypeRetryDisposition.check_lower(value.retry)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterTypeDeliveryDisposition.write(value.delivery, buf)
-        _UniffiFfiConverterTypeRetryDisposition.write(value.retry, buf)
-
-class _UniffiFfiConverterOptionalTypeDisposition(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeDisposition.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeDisposition.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeDisposition.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
 @dataclass
 class ActionResult:
-    def __init__(self, *, effect:ActionEffect, route:ActionRoute, delivery:typing.Optional[ActionDelivery], evidence:typing.Optional[typing.List[ActionEvidence]], escalation:typing.Optional[ActionEscalation], summary:typing.Optional[str], error:typing.Optional[ActionError], hint:typing.Optional[str], next_call:typing.Optional[ActionNextCall], disposition:typing.Optional[Disposition]):
+    def __init__(self, *, effect:ActionEffect, route:ActionRoute, delivery:typing.Optional[ActionDelivery], evidence:typing.Optional[typing.List[ActionEvidence]], escalation:typing.Optional[ActionEscalation], summary:typing.Optional[str], error:typing.Optional[ActionError], hint:typing.Optional[str], next_call:typing.Optional[ActionNextCall], fast_path:typing.Optional[str]):
         self.effect = effect
         self.route = route
         self.delivery = delivery
@@ -1752,13 +1547,13 @@ class ActionResult:
         self.error = error
         self.hint = hint
         self.next_call = next_call
-        self.disposition = disposition
+        self.fast_path = fast_path
 
 
 
 
     def __str__(self):
-        return "ActionResult(effect={}, route={}, delivery={}, evidence={}, escalation={}, summary={}, error={}, hint={}, next_call={}, disposition={})".format(self.effect, self.route, self.delivery, self.evidence, self.escalation, self.summary, self.error, self.hint, self.next_call, self.disposition)
+        return "ActionResult(effect={}, route={}, delivery={}, evidence={}, escalation={}, summary={}, error={}, hint={}, next_call={}, fast_path={})".format(self.effect, self.route, self.delivery, self.evidence, self.escalation, self.summary, self.error, self.hint, self.next_call, self.fast_path)
     def __eq__(self, other):
         if self.effect != other.effect:
             return False
@@ -1778,7 +1573,7 @@ class ActionResult:
             return False
         if self.next_call != other.next_call:
             return False
-        if self.disposition != other.disposition:
+        if self.fast_path != other.fast_path:
             return False
         return True
 
@@ -1795,7 +1590,7 @@ class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
             error=_UniffiFfiConverterOptionalTypeActionError.read(buf),
             hint=_UniffiFfiConverterOptionalString.read(buf),
             next_call=_UniffiFfiConverterOptionalTypeActionNextCall.read(buf),
-            disposition=_UniffiFfiConverterOptionalTypeDisposition.read(buf),
+            fast_path=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -1809,7 +1604,7 @@ class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeActionError.check_lower(value.error)
         _UniffiFfiConverterOptionalString.check_lower(value.hint)
         _UniffiFfiConverterOptionalTypeActionNextCall.check_lower(value.next_call)
-        _UniffiFfiConverterOptionalTypeDisposition.check_lower(value.disposition)
+        _UniffiFfiConverterOptionalString.check_lower(value.fast_path)
 
     @staticmethod
     def write(value, buf):
@@ -1822,7 +1617,7 @@ class _UniffiFfiConverterTypeActionResult(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeActionError.write(value.error, buf)
         _UniffiFfiConverterOptionalString.write(value.hint, buf)
         _UniffiFfiConverterOptionalTypeActionNextCall.write(value.next_call, buf)
-        _UniffiFfiConverterOptionalTypeDisposition.write(value.disposition, buf)
+        _UniffiFfiConverterOptionalString.write(value.fast_path, buf)
 
 class _UniffiFfiConverterBoolean:
     @classmethod
@@ -4168,112 +3963,6 @@ class _UniffiFfiConverterTypeEndSessionOutput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.session, buf)
         _UniffiFfiConverterBoolean.write(value.active, buf)
 
-
-
-
-
-
-class EscalationReason(enum.Enum):
-
-    AX_TREE_PIXEL_MISMATCH = 0
-
-    BACKGROUND_DELIVERY_FAILED = 1
-
-    FOREGROUND_INEFFECTIVE = 2
-
-    NO_WINDOW_TARGET = 3
-
-    OTHER = 4
-
-
-
-class _UniffiFfiConverterTypeEscalationReason(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return EscalationReason.AX_TREE_PIXEL_MISMATCH
-        if variant == 2:
-            return EscalationReason.BACKGROUND_DELIVERY_FAILED
-        if variant == 3:
-            return EscalationReason.FOREGROUND_INEFFECTIVE
-        if variant == 4:
-            return EscalationReason.NO_WINDOW_TARGET
-        if variant == 5:
-            return EscalationReason.OTHER
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == EscalationReason.AX_TREE_PIXEL_MISMATCH:
-            return
-        if value == EscalationReason.BACKGROUND_DELIVERY_FAILED:
-            return
-        if value == EscalationReason.FOREGROUND_INEFFECTIVE:
-            return
-        if value == EscalationReason.NO_WINDOW_TARGET:
-            return
-        if value == EscalationReason.OTHER:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == EscalationReason.AX_TREE_PIXEL_MISMATCH:
-            buf.write_i32(1)
-        if value == EscalationReason.BACKGROUND_DELIVERY_FAILED:
-            buf.write_i32(2)
-        if value == EscalationReason.FOREGROUND_INEFFECTIVE:
-            buf.write_i32(3)
-        if value == EscalationReason.NO_WINDOW_TARGET:
-            buf.write_i32(4)
-        if value == EscalationReason.OTHER:
-            buf.write_i32(5)
-
-
-
-@dataclass
-class EscalateSessionInput:
-    def __init__(self, *, session:str, reason:EscalationReason, detail:typing.Optional[str]):
-        self.session = session
-        self.reason = reason
-        self.detail = detail
-
-
-
-
-    def __str__(self):
-        return "EscalateSessionInput(session={}, reason={}, detail={})".format(self.session, self.reason, self.detail)
-    def __eq__(self, other):
-        if self.session != other.session:
-            return False
-        if self.reason != other.reason:
-            return False
-        if self.detail != other.detail:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeEscalateSessionInput(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return EscalateSessionInput(
-            session=_UniffiFfiConverterString.read(buf),
-            reason=_UniffiFfiConverterTypeEscalationReason.read(buf),
-            detail=_UniffiFfiConverterOptionalString.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterString.check_lower(value.session)
-        _UniffiFfiConverterTypeEscalationReason.check_lower(value.reason)
-        _UniffiFfiConverterOptionalString.check_lower(value.detail)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterString.write(value.session, buf)
-        _UniffiFfiConverterTypeEscalationReason.write(value.reason, buf)
-        _UniffiFfiConverterOptionalString.write(value.detail, buf)
-
 @dataclass
 class GetAgentCursorStateInput:
     def __init__(self, *, session:str):
@@ -4525,36 +4214,6 @@ class _UniffiFfiConverterTypeGetSessionInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalString.write(value.session, buf)
 
 @dataclass
-class GetSessionStateInput:
-    def __init__(self, *, session:typing.Optional[str]):
-        self.session = session
-
-
-
-
-    def __str__(self):
-        return "GetSessionStateInput(session={})".format(self.session)
-    def __eq__(self, other):
-        if self.session != other.session:
-            return False
-        return True
-
-class _UniffiFfiConverterTypeGetSessionStateInput(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        return GetSessionStateInput(
-            session=_UniffiFfiConverterOptionalString.read(buf),
-        )
-
-    @staticmethod
-    def check_lower(value):
-        _UniffiFfiConverterOptionalString.check_lower(value.session)
-
-    @staticmethod
-    def write(value, buf):
-        _UniffiFfiConverterOptionalString.write(value.session, buf)
-
-@dataclass
 class GetWindowStateInput:
     def __init__(self, *, pid:int, window_id:int, session:typing.Optional[str], query:typing.Optional[str], include_accessibility_tree:typing.Optional[bool], include_screenshot:typing.Optional[bool], screenshot_out_file:typing.Optional[str], max_elements:typing.Optional[int], max_depth:typing.Optional[int], max_dimension:typing.Optional[int], max_image_dimension:typing.Optional[int], timeout_ms:typing.Optional[int] = _DEFAULT, tree_format:typing.Optional[str] = _DEFAULT, since:typing.Optional[str] = _DEFAULT, verbose:typing.Optional[bool] = _DEFAULT, full_output:typing.Optional[bool] = _DEFAULT):
         self.pid = pid
@@ -4737,6 +4396,31 @@ class _UniffiFfiConverterTypeHotkeyInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeDesktopScope.write(value.scope, buf)
         _UniffiFfiConverterOptionalString.write(value.session, buf)
 
+class _UniffiFfiConverterOptionalTypeInputDeliveryMode(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeInputDeliveryMode.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeInputDeliveryMode.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeInputDeliveryMode.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 @dataclass
 class InvokeMenuInput:
     """
@@ -4746,23 +4430,26 @@ class InvokeMenuInput:
     macOS, three periods in a label also match the ellipsis character that
     native menu titles use (`Save As...` finds `Save As…`).
 """
-    def __init__(self, *, pid:int, window_id:int, path:typing.List[str], session:typing.Optional[str]):
+    def __init__(self, *, pid:int, window_id:int, path:typing.List[str], delivery_mode:typing.Optional[InputDeliveryMode], session:typing.Optional[str]):
         self.pid = pid
         self.window_id = window_id
         self.path = path
+        self.delivery_mode = delivery_mode
         self.session = session
 
 
 
 
     def __str__(self):
-        return "InvokeMenuInput(pid={}, window_id={}, path={}, session={})".format(self.pid, self.window_id, self.path, self.session)
+        return "InvokeMenuInput(pid={}, window_id={}, path={}, delivery_mode={}, session={})".format(self.pid, self.window_id, self.path, self.delivery_mode, self.session)
     def __eq__(self, other):
         if self.pid != other.pid:
             return False
         if self.window_id != other.window_id:
             return False
         if self.path != other.path:
+            return False
+        if self.delivery_mode != other.delivery_mode:
             return False
         if self.session != other.session:
             return False
@@ -4775,6 +4462,7 @@ class _UniffiFfiConverterTypeInvokeMenuInput(_UniffiConverterRustBuffer):
             pid=_UniffiFfiConverterUInt32.read(buf),
             window_id=_UniffiFfiConverterUInt64.read(buf),
             path=_UniffiFfiConverterSequenceString.read(buf),
+            delivery_mode=_UniffiFfiConverterOptionalTypeInputDeliveryMode.read(buf),
             session=_UniffiFfiConverterOptionalString.read(buf),
         )
 
@@ -4783,6 +4471,7 @@ class _UniffiFfiConverterTypeInvokeMenuInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt32.check_lower(value.pid)
         _UniffiFfiConverterUInt64.check_lower(value.window_id)
         _UniffiFfiConverterSequenceString.check_lower(value.path)
+        _UniffiFfiConverterOptionalTypeInputDeliveryMode.check_lower(value.delivery_mode)
         _UniffiFfiConverterOptionalString.check_lower(value.session)
 
     @staticmethod
@@ -4790,6 +4479,7 @@ class _UniffiFfiConverterTypeInvokeMenuInput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt32.write(value.pid, buf)
         _UniffiFfiConverterUInt64.write(value.window_id, buf)
         _UniffiFfiConverterSequenceString.write(value.path, buf)
+        _UniffiFfiConverterOptionalTypeInputDeliveryMode.write(value.delivery_mode, buf)
         _UniffiFfiConverterOptionalString.write(value.session, buf)
 
 @dataclass
@@ -7171,50 +6861,23 @@ class _UniffiFfiConverterTypeEffectiveScope(_UniffiConverterRustBuffer):
 
 
 
-class _UniffiFfiConverterOptionalTypeEscalationReason(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterTypeEscalationReason.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterTypeEscalationReason.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterTypeEscalationReason.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
-
 @dataclass
 class SessionStateOutput:
     """
-    Successful structured result shared by session state and escalation tools.
+    Capture-scope state carried by the `start_session` result.
 """
-    def __init__(self, *, session:str, capture_scope:CaptureScope, effective_scope:EffectiveScope, desktop_capture_authorized:bool, desktop_unlocked:bool, escalation_reason:typing.Optional[EscalationReason], escalation_detail:typing.Optional[str]):
+    def __init__(self, *, session:str, capture_scope:CaptureScope, effective_scope:EffectiveScope, desktop_capture_authorized:bool, desktop_unlocked:bool):
         self.session = session
         self.capture_scope = capture_scope
         self.effective_scope = effective_scope
         self.desktop_capture_authorized = desktop_capture_authorized
         self.desktop_unlocked = desktop_unlocked
-        self.escalation_reason = escalation_reason
-        self.escalation_detail = escalation_detail
 
 
 
 
     def __str__(self):
-        return "SessionStateOutput(session={}, capture_scope={}, effective_scope={}, desktop_capture_authorized={}, desktop_unlocked={}, escalation_reason={}, escalation_detail={})".format(self.session, self.capture_scope, self.effective_scope, self.desktop_capture_authorized, self.desktop_unlocked, self.escalation_reason, self.escalation_detail)
+        return "SessionStateOutput(session={}, capture_scope={}, effective_scope={}, desktop_capture_authorized={}, desktop_unlocked={})".format(self.session, self.capture_scope, self.effective_scope, self.desktop_capture_authorized, self.desktop_unlocked)
     def __eq__(self, other):
         if self.session != other.session:
             return False
@@ -7225,10 +6888,6 @@ class SessionStateOutput:
         if self.desktop_capture_authorized != other.desktop_capture_authorized:
             return False
         if self.desktop_unlocked != other.desktop_unlocked:
-            return False
-        if self.escalation_reason != other.escalation_reason:
-            return False
-        if self.escalation_detail != other.escalation_detail:
             return False
         return True
 
@@ -7241,8 +6900,6 @@ class _UniffiFfiConverterTypeSessionStateOutput(_UniffiConverterRustBuffer):
             effective_scope=_UniffiFfiConverterTypeEffectiveScope.read(buf),
             desktop_capture_authorized=_UniffiFfiConverterBoolean.read(buf),
             desktop_unlocked=_UniffiFfiConverterBoolean.read(buf),
-            escalation_reason=_UniffiFfiConverterOptionalTypeEscalationReason.read(buf),
-            escalation_detail=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -7252,8 +6909,6 @@ class _UniffiFfiConverterTypeSessionStateOutput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterTypeEffectiveScope.check_lower(value.effective_scope)
         _UniffiFfiConverterBoolean.check_lower(value.desktop_capture_authorized)
         _UniffiFfiConverterBoolean.check_lower(value.desktop_unlocked)
-        _UniffiFfiConverterOptionalTypeEscalationReason.check_lower(value.escalation_reason)
-        _UniffiFfiConverterOptionalString.check_lower(value.escalation_detail)
 
     @staticmethod
     def write(value, buf):
@@ -7262,8 +6917,6 @@ class _UniffiFfiConverterTypeSessionStateOutput(_UniffiConverterRustBuffer):
         _UniffiFfiConverterTypeEffectiveScope.write(value.effective_scope, buf)
         _UniffiFfiConverterBoolean.write(value.desktop_capture_authorized, buf)
         _UniffiFfiConverterBoolean.write(value.desktop_unlocked, buf)
-        _UniffiFfiConverterOptionalTypeEscalationReason.write(value.escalation_reason, buf)
-        _UniffiFfiConverterOptionalString.write(value.escalation_detail, buf)
 
 @dataclass
 class SetAgentCursorEnabledInput:
@@ -8895,8 +8548,6 @@ __all__ = [
     "ActionEvidenceKind",
     "ActionEffect",
     "ActionRoute",
-    "DeliveryDisposition",
-    "RetryDisposition",
     "ActionTarget",
     "ClickPosition",
     "InputDeliveryMode",
@@ -8907,7 +8558,6 @@ __all__ = [
     "CursorReducedMotion",
     "CursorAction",
     "DesktopScope",
-    "EscalationReason",
     "SessionLifecycleState",
     "SessionClientKindOutput",
     "SessionTransportOutput",
@@ -8927,7 +8577,6 @@ __all__ = [
     "ActionEscalation",
     "ActionEvidence",
     "ActionNextCall",
-    "Disposition",
     "ActionResult",
     "AppInfo",
     "BoundsExpectation",
@@ -8950,14 +8599,12 @@ __all__ = [
     "ElementPredicate",
     "EndSessionInput",
     "EndSessionOutput",
-    "EscalateSessionInput",
     "GetAgentCursorStateInput",
     "GetAgentCursorStateOutput",
     "GetCursorPositionInput",
     "GetDesktopStateInput",
     "GetScreenSizeInput",
     "GetSessionInput",
-    "GetSessionStateInput",
     "GetWindowStateInput",
     "HotkeyInput",
     "InvokeMenuInput",

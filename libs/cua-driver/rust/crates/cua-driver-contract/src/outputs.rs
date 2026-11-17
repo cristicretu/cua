@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Cua AI, Inc.
 
-use crate::{schema_settings, CaptureScope, EscalationReason, Platform};
+use crate::{schema_settings, CaptureScope, Platform};
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -179,7 +179,7 @@ impl EffectiveScope {
     }
 }
 
-/// Successful structured result shared by session state and escalation tools.
+/// Capture-scope state carried by the `start_session` result.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Record)]
 pub struct SessionStateOutput {
     pub session: String,
@@ -191,10 +191,6 @@ pub struct SessionStateOutput {
     /// Compatibility field: this reports whether this session has unlocked
     /// desktop capture scope. It is not an operating-system lock-screen probe.
     pub desktop_unlocked: bool,
-    #[schemars(required, schema_with = "nullable_escalation_reason_schema")]
-    pub escalation_reason: Option<EscalationReason>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
-    pub escalation_detail: Option<String>,
 }
 
 impl ToolOutput for SessionStateOutput {}
@@ -707,6 +703,17 @@ pub struct ActionResult {
     /// or a call that keeps the user's window where it is).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_call: Option<ActionNextCall>,
+    /// Present only when the `fast_path` config key is `on`: the check cost,
+    /// the target class and the changed regions since the last read, as one
+    /// JSON object. Absent when the flag is off, so default results are
+    /// unchanged.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_json_object_text"
+    )]
+    #[schemars(schema_with = "object_schema")]
+    pub fast_path: Option<String>,
     /// Whether input reached the app, and whether repeating the call is safe.
     /// Stamped by the dispatch seam on every mutating tool's result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -815,6 +822,33 @@ mod json_object_text {
     }
 }
 
+/// Serde adapter: an optional JSON object on the wire, JSON text in the record.
+mod optional_json_object_text {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde_json::Value;
+
+    pub fn serialize<S: Serializer>(
+        text: &Option<String>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match text {
+            Some(text) => super::json_object_text::serialize(text, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        Ok(
+            Option::<Value>::deserialize(deserializer)?.and_then(|v| match v {
+                Value::Object(_) => Some(v.to_string()),
+                _ => None,
+            }),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionResultValidationError {
     ConfirmedRequiresEvidence,
@@ -919,24 +953,6 @@ fn nullable_cursor_point_schema(generator: &mut schemars::SchemaGenerator) -> sc
     schemars::json_schema!({ "anyOf": [point, { "type": "null" }] })
 }
 
-fn nullable_escalation_reason_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::json_schema!({
-        "anyOf": [
-            {
-                "type": "string",
-                "enum": [
-                    "ax_tree_pixel_mismatch",
-                    "background_delivery_failed",
-                    "foreground_ineffective",
-                    "no_window_target",
-                    "other"
-                ]
-            },
-            { "type": "null" }
-        ]
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -972,6 +988,7 @@ mod tests {
             hint: None,
             next_call: None,
             disposition: None,
+            fast_path: None,
         }
     }
 
@@ -1033,6 +1050,7 @@ mod tests {
                 "error",
                 "escalation",
                 "evidence",
+                "fast_path",
                 "hint",
                 "next_call",
                 "route",

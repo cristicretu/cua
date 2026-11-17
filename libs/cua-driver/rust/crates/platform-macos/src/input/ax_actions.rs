@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Cua AI, Inc.
+
 //! AX action dispatch — the preferred click/interaction path for indexed elements.
 
 use crate::ax::bindings::*;
@@ -339,21 +342,39 @@ impl AxMutationError {
 /// disposition when the failure is an [`AxMutationError`], plain otherwise.
 pub fn ax_error_result(prefix: &str, error: &anyhow::Error) -> ToolResult {
     let result = ToolResult::error(format!("{prefix}: {error}"));
+    if error.downcast_ref::<ElementDisabled>().is_some() {
+        return result.with_structured(serde_json::json!({
+            "code": ElementDisabled::CODE,
+            "effect": "refused",
+            "disposition": Disposition::not_delivered(),
+        }));
+    }
     match error.downcast_ref::<AxMutationError>() {
         Some(mutation) => result.with_structured(mutation.structured()),
         None => result,
     }
 }
 
+/// The live `AXEnabled` read said the target is disabled, so nothing was sent.
+/// Tools turn this into a structured `element_disabled` refusal.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "refusing {action}: the target reports AXEnabled=false, so the app would ignore it. \
+     Nothing was sent. Snapshot again and act once the element reports enabled"
+)]
+pub struct ElementDisabled {
+    pub action: String,
+}
+
+impl ElementDisabled {
+    pub const CODE: &'static str = "element_disabled";
+}
+
 fn ensure_ax_enabled(enabled: Option<bool>, action: &str) -> anyhow::Result<()> {
     if enabled == Some(false) {
-        return Err(AxMutationError::refused(
-            "element_disabled",
-            format!(
-                "refusing {action}: the target reports AXEnabled=false. \
-                 Retry this action with delivery_mode:\"foreground\" or call bring_to_front first"
-            ),
-        )
+        return Err(ElementDisabled {
+            action: action.to_owned(),
+        }
         .into());
     }
     Ok(())
@@ -367,6 +388,31 @@ fn ensure_ax_enabled(enabled: Option<bool>, action: &str) -> anyhow::Result<()> 
 pub fn ensure_ax_action_enabled(element_ptr: usize, action: &str) -> anyhow::Result<()> {
     let enabled = unsafe { copy_bool_attr(element_ptr as AXUIElementRef, "AXEnabled") };
     ensure_ax_enabled(enabled, action)
+}
+
+/// How long a read made right after a foreground activation waits for a
+/// control that reports disabled to become enabled.
+const ACTIVATION_ENABLE_SETTLE: std::time::Duration = std::time::Duration::from_millis(750);
+const ACTIVATION_ENABLE_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Like [`ensure_ax_action_enabled`], for a read made right after a foreground
+/// activation. The window reports focus before the app has handled its
+/// activation, so a control that is enabled only while the app is active can
+/// still read `AXEnabled=false` for a moment. Re-read until it reports enabled
+/// or the settle window ends, then refuse. A control that stays disabled costs
+/// one settle window before the refusal.
+pub fn ensure_ax_action_enabled_after_activation(
+    element_ptr: usize,
+    action: &str,
+) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + ACTIVATION_ENABLE_SETTLE;
+    loop {
+        let enabled = unsafe { copy_bool_attr(element_ptr as AXUIElementRef, "AXEnabled") };
+        if enabled != Some(false) || std::time::Instant::now() >= deadline {
+            return ensure_ax_enabled(enabled, action);
+        }
+        std::thread::sleep(ACTIVATION_ENABLE_POLL);
+    }
 }
 
 /// Perform an AX action on a cached element.
@@ -482,23 +528,26 @@ mod tests {
     #[test]
     fn disabled_elements_are_refused_before_dispatch() {
         let error = ensure_ax_enabled(Some(false), "AXPick").unwrap_err();
+        let disabled = error
+            .downcast_ref::<ElementDisabled>()
+            .expect("a disabled target is a typed refusal");
+        assert_eq!(disabled.action, "AXPick");
         let message = error.to_string();
         assert!(message.contains("AXEnabled=false"));
-        assert!(message.contains("delivery_mode:\"foreground\""));
-        assert!(message.contains("bring_to_front"));
+        // A foreground retry does not enable a disabled control.
+        assert!(!message.contains("foreground"));
+        assert!(!message.contains("bring_to_front"));
     }
 
     #[test]
     fn a_disabled_refusal_says_nothing_was_sent() {
         let error = ensure_ax_enabled(Some(false), "AXPress").unwrap_err();
-        let mutation = error.downcast_ref::<AxMutationError>().expect("typed");
-        assert_eq!(mutation.code, "element_disabled");
-        assert!(mutation.disposition.is_retry_safe());
-        // The batch foreground fallback still recognises the message.
         let result = ax_error_result("AX action failed", &error);
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["code"], "element_disabled");
         assert_eq!(
-            result.structured_content.unwrap()["code"],
-            "element_disabled"
+            structured["disposition"],
+            serde_json::json!({"delivery": "not_delivered", "retry": "safe"})
         );
     }
 
